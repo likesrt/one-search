@@ -40,7 +40,11 @@ func NewManager(store Store) *Manager {
 	return &Manager{store: store, positions: map[string]int{}, states: map[int64]*keyState{}, providerStates: map[string]*providerState{}}
 }
 
-func (m *Manager) Acquire(ctx context.Context, providerName string) (model.APIKey, func(bool, error), error) {
+// Acquire picks an available key for the provider. excludeIDs are the keys already
+// tried by the current request: the first pass skips them so a retry does not hit the
+// same key again (weight_priority has no rotation cursor), and the second pass ignores
+// them so single-key providers keep retrying the same key as before.
+func (m *Manager) Acquire(ctx context.Context, providerName string, excludeIDs ...int64) (model.APIKey, func(bool, error), error) {
 	keys, err := m.store.ListAvailableProviderKeys(ctx, providerName)
 	if err != nil {
 		return model.APIKey{}, nil, err
@@ -62,36 +66,45 @@ func (m *Manager) Acquire(ctx context.Context, providerName string) (model.APIKe
 	}
 	keys = m.orderKeys(providerName, keys, strategy)
 	start := m.startIndex(providerName, strategy)
-	for attempt := 0; attempt < len(keys); attempt++ {
-		index := (start + attempt) % len(keys)
-		key := keys[index]
-		state := m.stateFor(key.ID)
-		if !m.canUse(state, key, now) {
-			continue
-		}
-		state.active++
-		state.windowCount++
-		providerState.active++
-		if m.usesPosition(strategy) {
-			m.positions[providerName] = (index + 1) % len(keys)
-		}
-		released := false
-		release := func(success bool, err error) {
-			m.mu.Lock()
-			if !released {
-				released = true
-				if state.active > 0 {
-					state.active--
-				}
-				if providerState.active > 0 {
-					providerState.active--
-				}
+	excluded := make(map[int64]bool, len(excludeIDs))
+	for _, id := range excludeIDs {
+		excluded[id] = true
+	}
+	for pass := 0; pass < 2; pass++ {
+		for attempt := 0; attempt < len(keys); attempt++ {
+			index := (start + attempt) % len(keys)
+			key := keys[index]
+			if pass == 0 && excluded[key.ID] {
+				continue
 			}
-			m.mu.Unlock()
-			errorType := provider.ErrorType(err)
-			_ = m.store.RecordKeyResult(context.Background(), key, success, errorType)
+			state := m.stateFor(key.ID)
+			if !m.canUse(state, key, now) {
+				continue
+			}
+			state.active++
+			state.windowCount++
+			providerState.active++
+			if m.usesPosition(strategy) {
+				m.positions[providerName] = (index + 1) % len(keys)
+			}
+			released := false
+			release := func(success bool, err error) {
+				m.mu.Lock()
+				if !released {
+					released = true
+					if state.active > 0 {
+						state.active--
+					}
+					if providerState.active > 0 {
+						providerState.active--
+					}
+				}
+				m.mu.Unlock()
+				errorType := provider.ErrorType(err)
+				_ = m.store.RecordKeyResult(context.Background(), key, success, errorType)
+			}
+			return key, release, nil
 		}
-		return key, release, nil
 	}
 	return model.APIKey{}, nil, &provider.Error{Type: provider.ErrorTypeRateLimited, Message: "all keys are limited or busy for " + providerName}
 }
@@ -115,6 +128,14 @@ func (m *Manager) orderKeys(providerName string, keys []model.APIKey, strategy s
 		rand.Shuffle(len(ordered), func(i, j int) { ordered[i], ordered[j] = ordered[j], ordered[i] })
 	case "weighted_random":
 		return weightedKeyOrder(ordered)
+	case "weight_priority":
+		// Shuffle first, then stable-sort by weight: ties keep their shuffled order,
+		// which yields descending weight tiers with random picks inside a tier.
+		rand.Shuffle(len(ordered), func(i, j int) { ordered[i], ordered[j] = ordered[j], ordered[i] })
+		sort.SliceStable(ordered, func(i, j int) bool {
+			return keyWeight(ordered[i]) > keyWeight(ordered[j])
+		})
+		return ordered
 	default:
 		return ordered
 	}
@@ -131,11 +152,19 @@ func (m *Manager) startIndex(providerName, strategy string) int {
 
 func (m *Manager) usesPosition(strategy string) bool {
 	switch strategy {
-	case "least_used", "random", "weighted_random":
+	case "least_used", "random", "weighted_random", "weight_priority":
 		return false
 	default:
 		return true
 	}
+}
+
+// keyWeight returns the effective routing weight; non-positive values count as 1.
+func keyWeight(key model.APIKey) int {
+	if key.Weight <= 0 {
+		return 1
+	}
+	return key.Weight
 }
 
 func weightedKeyOrder(keys []model.APIKey) []model.APIKey {
@@ -144,19 +173,12 @@ func weightedKeyOrder(keys []model.APIKey) []model.APIKey {
 	for len(remaining) > 0 {
 		totalWeight := 0
 		for _, key := range remaining {
-			weight := key.Weight
-			if weight <= 0 {
-				weight = 1
-			}
-			totalWeight += weight
+			totalWeight += keyWeight(key)
 		}
 		pick := rand.Intn(totalWeight)
 		selected := 0
 		for index, key := range remaining {
-			weight := key.Weight
-			if weight <= 0 {
-				weight = 1
-			}
+			weight := keyWeight(key)
 			if pick < weight {
 				selected = index
 				break

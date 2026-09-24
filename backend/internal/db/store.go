@@ -397,7 +397,7 @@ func (s *Store) CreateProviderKey(ctx context.Context, providerName, alias, plai
 		INSERT INTO provider_keys (provider_id, alias, key_ciphertext, key_hint, exa_api_key_id, exa_service_key_ciphertext, exa_service_key_hint, weight, rpm_limit, daily_quota, monthly_quota, max_concurrency)
 		SELECT id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12 FROM providers WHERE name=$1
 		RETURNING id
-	`, providerName, alias, ciphertext, keyHint, strings.TrimSpace(exaAPIKeyID), exaServiceKeyCiphertext, exaServiceKeyHint, weightOrDefault(weight), rpmLimit, dailyQuota, monthlyQuota, concurrencyOrDefault(maxConcurrency))
+	`, providerName, alias, ciphertext, keyHint, strings.TrimSpace(exaAPIKeyID), exaServiceKeyCiphertext, exaServiceKeyHint, clampWeight(weight), rpmLimit, dailyQuota, monthlyQuota, concurrencyOrDefault(maxConcurrency))
 	var id int64
 	if err := row.Scan(&id); err != nil {
 		return model.ProviderKeyView{}, err
@@ -444,6 +444,11 @@ func (s *Store) UpdateProviderKey(ctx context.Context, id int64, patch model.Pro
 		exaServiceKeyCiphertext = crypted
 		exaServiceKeyHint = security.MaskSecret(strings.TrimSpace(*patch.ExaServiceKey))
 	}
+	// Weight goes through the same clamp as creation so PATCH cannot store 0 or absurd values.
+	var weight interface{}
+	if patch.Weight != nil {
+		weight = clampWeight(*patch.Weight)
+	}
 
 	_, err := s.pool.Exec(ctx, `
 		UPDATE provider_keys
@@ -461,7 +466,7 @@ func (s *Store) UpdateProviderKey(ctx context.Context, id int64, patch model.Pro
 		    max_concurrency=COALESCE($13::int, max_concurrency),
 		    updated_at=now()
 		WHERE id=$1
-	`, id, stringPtrValue(patch.Alias), ciphertext, keyHint, exaAPIKeyID, exaServiceKeyCiphertext, exaServiceKeyHint, stringPtrValue(patch.Status), intPtrValue(patch.Weight), intPtrValue(patch.RPMLimit), intPtrValue(patch.DailyQuota), intPtrValue(patch.MonthlyQuota), intPtrValue(patch.MaxConcurrency))
+	`, id, stringPtrValue(patch.Alias), ciphertext, keyHint, exaAPIKeyID, exaServiceKeyCiphertext, exaServiceKeyHint, stringPtrValue(patch.Status), weight, intPtrValue(patch.RPMLimit), intPtrValue(patch.DailyQuota), intPtrValue(patch.MonthlyQuota), intPtrValue(patch.MaxConcurrency))
 	if err != nil {
 		return model.ProviderKeyView{}, err
 	}
@@ -1540,9 +1545,14 @@ func (s *Store) DeleteOldLogs(ctx context.Context, retentionDays int) (int64, in
 	return searchResult.RowsAffected(), auditResult.RowsAffected(), nil
 }
 
-func weightOrDefault(value int) int {
+// clampWeight keeps routing weights inside [1, 10000]; values <= 0 count as 1 so a key
+// always stays selectable, and huge values cannot dominate the tier ordering.
+func clampWeight(value int) int {
 	if value <= 0 {
 		return 1
+	}
+	if value > 10000 {
+		return 10000
 	}
 	return value
 }

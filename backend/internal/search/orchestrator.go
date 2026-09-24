@@ -22,7 +22,7 @@ import (
 const emptyResultCacheTTLSeconds = 60
 
 type KeyPool interface {
-	Acquire(ctx context.Context, providerName string) (model.APIKey, func(bool, error), error)
+	Acquire(ctx context.Context, providerName string, excludeIDs ...int64) (model.APIKey, func(bool, error), error)
 }
 
 type Store interface {
@@ -378,10 +378,11 @@ func (o *Orchestrator) callProvider(ctx context.Context, req model.SearchRequest
 		retryCount = 20
 	}
 	attempts := retryCount + 1
+	var triedIDs []int64
 	for attempt := 0; attempt < attempts; attempt++ {
 		attemptStarted := time.Now()
 		attemptIndex := attempt + 1
-		key, release, err := o.keyPool.Acquire(ctx, providerName)
+		key, release, err := o.keyPool.Acquire(ctx, providerName, triedIDs...)
 		if err != nil {
 			execution.err = err
 			execution.errorType = provider.ErrorType(err)
@@ -402,6 +403,10 @@ func (o *Orchestrator) callProvider(ctx context.Context, req model.SearchRequest
 		}
 		providerResponse, err := adapter.Search(callCtx, providerReq, key)
 		cancel()
+		if key.ID > 0 {
+			// Remember the attempted key so the next retry prefers a different one.
+			triedIDs = append(triedIDs, key.ID)
+		}
 		success := err == nil
 		release(success, err)
 		o.refreshOfficialQuota(key)

@@ -138,6 +138,7 @@
                       <div class="key-main">
                         <el-input class="key-input" :model-value="row.key_hint || '已保存密钥'" readonly />
                         <div class="key-meta">
+                          <span>权重 {{ row.weight }}</span>
                           <span>成功 {{ row.total_successes }}</span>
                           <span>失败 {{ row.total_failures }}</span>
                           <span>成功率 {{ successRate(row) }}%</span>
@@ -150,6 +151,9 @@
                           <span v-if="row.provider_name === 'exa'">{{ row.exa_service_key_hint ? `x-api-key ${row.exa_service_key_hint}` : '本地计费' }}</span>
                         </div>
                       </div>
+                      <el-tooltip content="编辑密钥" placement="top">
+                        <el-button link class="row-icon-button" :icon="Edit" aria-label="编辑密钥" @click="openKeyEdit(row)" />
+                      </el-tooltip>
                       <el-tooltip content="复制密钥" placement="top">
                         <el-button link class="row-icon-button" :icon="CopyDocument" :loading="copyingKeyId === row.id" aria-label="复制密钥" @click="copyKey(row)" />
                       </el-tooltip>
@@ -257,10 +261,11 @@
                 <div class="advanced-field advanced-field-wide">
                   <div class="advanced-field-label">Key 路由策略</div>
                   <el-select v-model="providerKeyRoutingStrategy" placeholder="选择策略">
-                    <el-option value="round_robin" label="权重优先轮询" />
+                    <el-option value="round_robin" label="按权重排序轮询" />
                     <el-option value="least_used" label="最少使用优先" />
                     <el-option value="random" label="随机" />
                     <el-option value="weighted_random" label="按权重随机" />
+                    <el-option value="weight_priority" label="权重优先（高权重先用）" />
                   </el-select>
                 </div>
               </div>
@@ -303,16 +308,38 @@
         </div>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="keyDialog" title="编辑密钥" width="520px">
+      <el-form label-position="top">
+        <el-form-item label="别名"><el-input v-model="keyForm.alias" /></el-form-item>
+        <el-form-item label="权重（1-10000，越大越优先）">
+          <el-input-number v-model="keyForm.weight" :min="1" :max="10000" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="每分钟限制（0 表示不限）">
+          <el-input-number v-model="keyForm.rpm_limit" :min="0" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="日额度（0 表示不限）">
+          <el-input-number v-model="keyForm.daily_quota" :min="0" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="月额度（0 表示不限）">
+          <el-input-number v-model="keyForm.monthly_quota" :min="0" controls-position="right" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="keyDialog = false">取消</el-button>
+        <el-button type="primary" :loading="savingKey" @click="saveKey">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import PageSkeleton from '../components/PageSkeleton.vue'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { ElNotification } from 'element-plus/es/components/notification/index'
-import { Check, CircleCheck, Clock, Close, CopyDocument, Delete, Plus, Refresh, Remove, WarnTriangleFilled } from '@element-plus/icons-vue'
+import { Check, CircleCheck, Clock, Close, CopyDocument, Delete, Edit, Plus, Refresh, Remove, WarnTriangleFilled } from '@element-plus/icons-vue'
 import { api, OfficialQuotaResult, ProviderConfig, ProviderKey } from '../api/client'
 
 type EditableKey = ProviderKey & { isNew?: boolean }
@@ -327,6 +354,10 @@ const providerForm = ref<ProviderConfig | null>(null)
 const savingProvider = ref(false)
 const creatingKey = ref(false)
 const creatingRow = ref(false)
+const keyDialog = ref(false)
+const editingKey = ref<EditableKey | null>(null)
+const savingKey = ref(false)
+const keyForm = reactive({ alias: '', weight: 1, rpm_limit: 0, daily_quota: 0, monthly_quota: 0 })
 const draftKey = ref('')
 const draftExaServiceKey = ref('')
 const testingKeyId = ref<number | null>(null)
@@ -655,6 +686,37 @@ async function createKey() {
   }
 }
 
+function openKeyEdit(row: EditableKey) {
+  editingKey.value = row
+  keyForm.alias = row.alias || ''
+  keyForm.weight = row.weight > 0 ? row.weight : 1
+  keyForm.rpm_limit = row.rpm_limit || 0
+  keyForm.daily_quota = row.daily_quota || 0
+  keyForm.monthly_quota = row.monthly_quota || 0
+  keyDialog.value = true
+}
+
+async function saveKey() {
+  if (!editingKey.value) return
+  if (!keyForm.alias.trim()) { ElMessage.warning('请填写密钥别名'); return }
+  if (keyForm.weight < 1 || keyForm.weight > 10000) { ElMessage.warning('权重需在 1-10000 之间'); return }
+  savingKey.value = true
+  try {
+    await api.updateKey(editingKey.value.id, {
+      alias: keyForm.alias.trim(),
+      weight: keyForm.weight,
+      rpm_limit: keyForm.rpm_limit,
+      daily_quota: keyForm.daily_quota,
+      monthly_quota: keyForm.monthly_quota
+    })
+    ElMessage.success('密钥已保存')
+    keyDialog.value = false
+    await load()
+  } finally {
+    savingKey.value = false
+  }
+}
+
 async function setKeyStatus(row: EditableKey, enabled: boolean) {
   const status = enabled ? 'enabled' : 'disabled'
   await api.updateKey(row.id, { status })
@@ -891,7 +953,7 @@ onMounted(load)
 }
 .api-key-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) repeat(5, 28px);
+  grid-template-columns: minmax(0, 1fr) repeat(6, 28px);
   align-items: start;
   column-gap: 2px;
   width: 100%;

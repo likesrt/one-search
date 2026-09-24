@@ -73,13 +73,16 @@ func (s *orchestratorTestStore) SetCache(ctx context.Context, cacheKey string, p
 type orchestratorTestKeyPool struct {
 	mu       sync.Mutex
 	acquired []string
+	excluded [][]int64
 }
 
-func (p *orchestratorTestKeyPool) Acquire(ctx context.Context, providerName string) (model.APIKey, func(bool, error), error) {
+func (p *orchestratorTestKeyPool) Acquire(ctx context.Context, providerName string, excludeIDs ...int64) (model.APIKey, func(bool, error), error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.acquired = append(p.acquired, providerName)
-	return model.APIKey{ID: int64(len(p.acquired)), ProviderName: providerName, Alias: providerName + "-key", Value: "test-key"}, func(bool, error) {}, nil
+	p.excluded = append(p.excluded, append([]int64(nil), excludeIDs...))
+	id := int64(len(p.acquired))
+	return model.APIKey{ID: id, ProviderName: providerName, Alias: providerName + "-key", Value: "test-key"}, func(bool, error) {}, nil
 }
 
 type orchestratorTestProvider struct {
@@ -483,6 +486,52 @@ func TestSearchRetriesTimeoutWithNextKey(t *testing.T) {
 	}
 	if len(keyPool.acquired) != 2 {
 		t.Fatalf("expected 2 key attempts, got %v", keyPool.acquired)
+	}
+}
+
+type flakyTestProvider struct {
+	name  string
+	calls int
+}
+
+func (p *flakyTestProvider) Name() string { return p.name }
+
+func (p *flakyTestProvider) Search(ctx context.Context, req model.SearchRequest, key model.APIKey) (model.ProviderResponse, error) {
+	p.calls++
+	if p.calls == 1 {
+		return model.ProviderResponse{}, context.DeadlineExceeded
+	}
+	return model.ProviderResponse{Results: []model.SearchResult{{Title: p.name, URL: "https://example.com/" + p.name, Provider: p.name, Score: 1}}}, nil
+}
+
+func (p *flakyTestProvider) HealthCheck(ctx context.Context, key model.APIKey) error { return nil }
+
+func TestSearchRetryPassesTriedKeyIDsToKeyPool(t *testing.T) {
+	keyPool := &orchestratorTestKeyPool{}
+	registry := provider.NewRegistry(&flakyTestProvider{name: model.ProviderJina})
+	store := &orchestratorTestStore{
+		settings: model.RuntimeSettings{
+			DefaultMode: model.SearchModeSingle, DefaultProviders: []string{model.ProviderJina}, DefaultLimit: 5,
+			DefaultDedupe: true, RequestTimeoutMS: 2000, CacheEnabled: false,
+		},
+		providers: []model.ProviderConfig{
+			{Name: model.ProviderJina, Enabled: true, Priority: 1, Weight: 1, TimeoutMS: 50, Settings: map[string]interface{}{"key_retry_count": 1}},
+		},
+	}
+	orch := NewOrchestrator(registry, keyPool, store)
+	if _, err := orch.Search(context.Background(), model.SearchRequest{
+		Query: "q", Providers: []string{model.ProviderJina}, ProvidersExplicit: true, Mode: model.SearchModeSingle,
+	}, "req-jina-exclude", 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(keyPool.excluded) != 2 {
+		t.Fatalf("Acquire calls = %d, want 2", len(keyPool.excluded))
+	}
+	if got := keyPool.excluded[0]; len(got) != 0 {
+		t.Fatalf("first Acquire excludeIDs = %v, want none", got)
+	}
+	if got := keyPool.excluded[1]; len(got) != 1 || got[0] != 1 {
+		t.Fatalf("second Acquire excludeIDs = %v, want [1]", got)
 	}
 }
 
