@@ -312,6 +312,35 @@ curl -X POST "$BASE_URL/api/admin/keys" \
   }'
 ```
 
+指向中转站的 Key 示例（Key 级基础 URL 覆盖）：
+
+```bash
+curl -X POST "$BASE_URL/api/admin/keys" \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "provider_name": "you",
+    "alias": "you-relay-a",
+    "key": "you-provider-key",
+    "base_url": "https://relay-a.example.com",
+    "weight": 1
+  }'
+```
+
+Brave 示例（默认地址含 `/res/v1` 路径前缀，覆盖时需写全）：
+
+```bash
+curl -X POST "$BASE_URL/api/admin/keys" \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "provider_name": "brave",
+    "alias": "brave-relay",
+    "key": "brave-provider-key",
+    "base_url": "https://relay-b.example.com/res/v1"
+  }'
+```
+
 字段说明：
 
 | 字段 | 说明 |
@@ -319,12 +348,15 @@ curl -X POST "$BASE_URL/api/admin/keys" \
 | `provider_name` | 内置 Provider 名：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`。 |
 | `alias` | Key 别名。同一 Provider 下唯一。 |
 | `key` | 上游搜索 API Key，会加密存储。 |
+| `base_url` | 可选。该 Key 专属的基础 URL，留空则回退到该渠道（Provider）的 `base_url`。非空时必须是 `http://` 或 `https://` 开头的完整地址，否则返回 400。**覆盖值是整段替换根地址**：Brave 默认地址为 `https://api.search.brave.com/res/v1`，指向中转站时必须写成 `<host>/res/v1`，否则会 404；其余 6 家默认地址不含路径前缀。 |
 | `exa_api_key_id` | Exa 官方 usage 查询使用的 API Key ID。Exa 可选但建议填写。 |
 | `exa_service_key` | Exa Team Management `x-api-key`。创建 Exa Key 时当前后端要求必填。 |
 | `weight` | 权重，默认 1，取值范围 1-10000（`<=0` 按 1 处理，`>10000` 截断为 10000）。`weight_priority` 策略下权重即档位：高权重档优先，同档内随机。 |
 | `rpm_limit` | 单 Key 每分钟限制，0 表示不限。 |
 | `daily_quota` | 单 Key 日请求额度，0 表示不限。 |
 | `monthly_quota` | 单 Key 月请求额度，0 表示不限。 |
+
+说明：搜索请求的生效地址按「Key 级 `base_url` → 渠道 `base_url`」顺序解析，两条路径（含管理台的「测试密钥」）行为一致。**官方额度查询不跟随 Key 级 `base_url`**：`POST /api/admin/keys/{id}/quota` 始终请求各家官方端点（例如 Exa 的 `admin-api.exa.ai`、Jina 的 `r.jina.ai`），把 Key 指向中转站后额度仍来自官方账号。
 
 ### 5.5 更新 Provider Key
 
@@ -338,7 +370,8 @@ curl -X PATCH "$BASE_URL/api/admin/keys/1" \
     "weight": 2,
     "rpm_limit": 120,
     "daily_quota": 5000,
-    "monthly_quota": 100000
+    "monthly_quota": 100000,
+    "base_url": "https://relay-a.example.com"
   }'
 ```
 
@@ -346,6 +379,7 @@ curl -X PATCH "$BASE_URL/api/admin/keys/1" \
 
 - `alias`
 - `key`
+- `base_url`：Key 级基础 URL。传空串 `""` 表示清除覆盖、回退渠道默认地址；字段缺省或 `null` 表示保持原值
 - `exa_api_key_id`
 - `exa_service_key`
 - `status`：`enabled`、`disabled`、`cooling`、`exhausted`
