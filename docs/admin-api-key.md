@@ -262,6 +262,18 @@ curl -X PATCH "$BASE_URL/api/admin/providers/exa" \
 
 说明：`PATCH /api/admin/providers/{name}` 会按请求体覆盖该 Provider 的主要配置字段，因此建议先 `GET /api/admin/providers`，在原对象基础上修改后再提交。`settings.max_concurrency` 是渠道级最大并发请求数，`0` 表示不限，正数表示该 Provider 同时在途请求上限。
 
+`settings.key_routing_strategy` 是该 Provider 的 Key 级路由策略，缺省或未知值等价于 `round_robin`：
+
+| 取值 | 说明 |
+| --- | --- |
+| `round_robin` | 默认策略。按权重降序、`last_used_at` 升序、`id` 升序排序后轮询，各 Key 长期流量均分，与权重大小无关。 |
+| `weight_priority` | 档位优先。按权重分档，优先使用最高档 Key；该档 Key 都失败或不可用后落到下一档；同档 Key 之间随机选择。 |
+| `least_used` | 优先使用累计成功 + 失败次数最少的 Key。 |
+| `random` | 每次随机排序后取第一个可用 Key。 |
+| `weighted_random` | 按权重加权抽样排序，低权重 Key 仍会分到流量。 |
+
+`weight_priority` 下若一次搜索需要换 Key 重试（例如超时、上游错误），会先换到其他可用 Key（同档优先，其次低档）；只有当渠道内已无其他可用 Key 时，才会重试同一个 Key。
+
 ### 5.4 创建 Provider Key
 
 You.com 示例：
@@ -309,7 +321,7 @@ curl -X POST "$BASE_URL/api/admin/keys" \
 | `key` | 上游搜索 API Key，会加密存储。 |
 | `exa_api_key_id` | Exa 官方 usage 查询使用的 API Key ID。Exa 可选但建议填写。 |
 | `exa_service_key` | Exa Team Management `x-api-key`。创建 Exa Key 时当前后端要求必填。 |
-| `weight` | 权重，默认 1。 |
+| `weight` | 权重，默认 1，取值范围 1-10000（`<=0` 按 1 处理，`>10000` 截断为 10000）。`weight_priority` 策略下权重即档位：高权重档优先，同档内随机。 |
 | `rpm_limit` | 单 Key 每分钟限制，0 表示不限。 |
 | `daily_quota` | 单 Key 日请求额度，0 表示不限。 |
 | `monthly_quota` | 单 Key 月请求额度，0 表示不限。 |
@@ -337,7 +349,7 @@ curl -X PATCH "$BASE_URL/api/admin/keys/1" \
 - `exa_api_key_id`
 - `exa_service_key`
 - `status`：`enabled`、`disabled`、`cooling`、`exhausted`
-- `weight`
+- `weight`：取值范围 1-10000，`<=0` 按 1 处理，`>10000` 截断为 10000
 - `rpm_limit`
 - `daily_quota`
 - `monthly_quota`
