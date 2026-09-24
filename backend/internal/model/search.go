@@ -133,6 +133,7 @@ type APIKey struct {
 	MonthlyUsed       int64     `json:"monthly_used,omitempty"`
 	MonthlyCredits    float64   `json:"monthly_credits,omitempty"`
 	MaxConcurrency    int       `json:"max_concurrency"`
+	BaseURL           string    `json:"base_url,omitempty"`
 	TotalSuccesses    int64     `json:"total_successes"`
 	TotalFailures     int64     `json:"total_failures"`
 	LastUsedAt        time.Time `json:"last_used_at,omitempty"`

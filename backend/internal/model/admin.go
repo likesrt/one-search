@@ -44,6 +44,7 @@ type ProviderKeyView struct {
 	ProviderName               string     `json:"provider_name"`
 	Alias                      string     `json:"alias"`
 	KeyHint                    string     `json:"key_hint"`
+	BaseURL                    string     `json:"base_url"`
 	Key                        string     `json:"key,omitempty"`
 	ExaAPIKeyID                string     `json:"exa_api_key_id,omitempty"`
 	ExaServiceKeyHint          string     `json:"exa_service_key_hint,omitempty"`
@@ -135,6 +136,7 @@ type SearchLogInput struct {
 type ProviderKeyUpdate struct {
 	Alias          *string `json:"alias,omitempty"`
 	Key            *string `json:"key,omitempty"`
+	BaseURL        *string `json:"base_url,omitempty"`
 	ExaAPIKeyID    *string `json:"exa_api_key_id,omitempty"`
 	ExaServiceKey  *string `json:"exa_service_key,omitempty"`
 	Status         *string `json:"status,omitempty"`

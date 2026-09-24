@@ -132,6 +132,8 @@ export interface ProviderKey {
   alias: string
   key_hint: string
   key?: string
+  /** key 级基础 URL 覆盖值；缺省或空串表示回退到渠道的 base_url */
+  base_url?: string
   exa_api_key_id?: string
   exa_service_key_hint?: string
   status: string

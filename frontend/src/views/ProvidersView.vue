@@ -124,6 +124,12 @@
                           placeholder="Exa 管理密钥（选填）"
                         />
                         <p v-if="providerForm?.name === 'exa' && !draftExaServiceKey.trim()" class="muted exa-local-billing-hint">不填将使用本地计算费用模式</p>
+                        <el-input
+                          v-model="draftKeyBaseURL"
+                          class="key-input"
+                          :placeholder="keyBaseURLPlaceholder"
+                        />
+                        <p class="muted key-base-url-hint">{{ KEY_BASE_URL_HINT }}</p>
                       </div>
                       <div class="new-key-actions">
                         <el-tooltip content="保存密钥" placement="top">
@@ -149,6 +155,7 @@
                             </span>
                           </el-tooltip>
                           <span v-if="row.provider_name === 'exa'">{{ row.exa_service_key_hint ? `x-api-key ${row.exa_service_key_hint}` : '本地计费' }}</span>
+                          <span v-if="row.base_url" :title="row.base_url">URL {{ hostOf(row.base_url) }}</span>
                         </div>
                       </div>
                       <el-tooltip content="编辑密钥" placement="top">
@@ -312,6 +319,10 @@
     <el-dialog v-model="keyDialog" title="编辑密钥" width="520px">
       <el-form label-position="top">
         <el-form-item label="别名"><el-input v-model="keyForm.alias" /></el-form-item>
+        <el-form-item label="基础 URL（选填)">
+          <el-input v-model="keyForm.base_url" :placeholder="keyBaseURLPlaceholder" />
+          <div class="key-base-url-hint muted">{{ KEY_BASE_URL_HINT }}</div>
+        </el-form-item>
         <el-form-item label="权重（1-10000，越大越优先）">
           <el-input-number v-model="keyForm.weight" :min="1" :max="10000" controls-position="right" />
         </el-form-item>
@@ -357,9 +368,10 @@ const creatingRow = ref(false)
 const keyDialog = ref(false)
 const editingKey = ref<EditableKey | null>(null)
 const savingKey = ref(false)
-const keyForm = reactive({ alias: '', weight: 1, rpm_limit: 0, daily_quota: 0, monthly_quota: 0 })
+const keyForm = reactive({ alias: '', weight: 1, rpm_limit: 0, daily_quota: 0, monthly_quota: 0, base_url: '' })
 const draftKey = ref('')
 const draftExaServiceKey = ref('')
+const draftKeyBaseURL = ref('')
 const testingKeyId = ref<number | null>(null)
 const quotaLoadingKeyId = ref<number | null>(null)
 const copyingKeyId = ref<number | null>(null)
@@ -463,6 +475,13 @@ const providerProxyURL = computed<string>({
     if (!providerForm.value) return
     providerForm.value.settings = { ...(providerForm.value.settings || {}), proxy_url: value.trim() }
   }
+})
+
+// key 级基础 URL 的填写说明：覆盖值是整段替换根，Brave 默认带 /res/v1 前缀，写漏会 404。
+const KEY_BASE_URL_HINT = '留空则使用渠道默认地址；Brave 默认含 /res/v1 路径前缀，指向中转站时需写全，否则会 404'
+const keyBaseURLPlaceholder = computed(() => {
+  const fallback = providerForm.value?.base_url?.trim()
+  return fallback ? `留空使用渠道默认：${fallback}` : '留空使用渠道默认地址'
 })
 const providerPricePerRequest = computed<number>({
   get() {
@@ -659,25 +678,48 @@ async function saveProvider() {
   }
 }
 
+/**
+ * 校验 key 级基础 URL：留空放行（回退渠道默认）；非空时必须是 http/https 绝对地址。
+ * 与后端 validateProviderKeyBaseURL 保持一致，提前给出提示而不是等 400。
+ * @returns 错误提示文案；校验通过时返回空串
+ */
+function keyBaseURLError(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '基础 URL 必须以 http:// 或 https:// 开头'
+    if (!parsed.host) return '基础 URL 缺少主机名'
+    return ''
+  } catch {
+    return '基础 URL 需是完整地址，例如 https://api.example.com'
+  }
+}
+
 function startCreateKey() {
   creatingRow.value = true
   draftKey.value = ''
   draftExaServiceKey.value = ''
+  draftKeyBaseURL.value = ''
 }
 
 function cancelCreateKey() {
   creatingRow.value = false
   draftKey.value = ''
   draftExaServiceKey.value = ''
+  draftKeyBaseURL.value = ''
 }
 
 async function createKey() {
   if (!providerForm.value) return
   if (!draftKey.value.trim()) { ElMessage.warning('请填写平台密钥'); return }
+  const baseURL = draftKeyBaseURL.value.trim()
+  const baseURLProblem = keyBaseURLError(baseURL)
+  if (baseURLProblem) { ElMessage.warning(baseURLProblem); return }
   const exaServiceKey = draftExaServiceKey.value.trim()
   creatingKey.value = true
   try {
-    await api.createKey({ provider_name: providerForm.value.name, alias: `${providerForm.value.name}-${Date.now()}`, key: draftKey.value.trim(), exa_service_key: exaServiceKey, weight: 1, rpm_limit: 0, daily_quota: 0, monthly_quota: 0 })
+    await api.createKey({ provider_name: providerForm.value.name, alias: `${providerForm.value.name}-${Date.now()}`, key: draftKey.value.trim(), exa_service_key: exaServiceKey, base_url: baseURL, weight: 1, rpm_limit: 0, daily_quota: 0, monthly_quota: 0 })
     ElMessage.success(providerForm.value.name === 'exa' && !exaServiceKey ? '密钥已添加，将使用本地计算费用模式' : '密钥已添加')
     cancelCreateKey()
     await load()
@@ -693,6 +735,7 @@ function openKeyEdit(row: EditableKey) {
   keyForm.rpm_limit = row.rpm_limit || 0
   keyForm.daily_quota = row.daily_quota || 0
   keyForm.monthly_quota = row.monthly_quota || 0
+  keyForm.base_url = row.base_url || ''
   keyDialog.value = true
 }
 
@@ -700,6 +743,8 @@ async function saveKey() {
   if (!editingKey.value) return
   if (!keyForm.alias.trim()) { ElMessage.warning('请填写密钥别名'); return }
   if (keyForm.weight < 1 || keyForm.weight > 10000) { ElMessage.warning('权重需在 1-10000 之间'); return }
+  const baseURLProblem = keyBaseURLError(keyForm.base_url)
+  if (baseURLProblem) { ElMessage.warning(baseURLProblem); return }
   savingKey.value = true
   try {
     await api.updateKey(editingKey.value.id, {
@@ -707,7 +752,9 @@ async function saveKey() {
       weight: keyForm.weight,
       rpm_limit: keyForm.rpm_limit,
       daily_quota: keyForm.daily_quota,
-      monthly_quota: keyForm.monthly_quota
+      monthly_quota: keyForm.monthly_quota,
+      // 空串是有效值：表示清除 key 级覆盖、回退渠道默认地址
+      base_url: keyForm.base_url.trim()
     })
     ElMessage.success('密钥已保存')
     keyDialog.value = false
@@ -977,6 +1024,12 @@ onMounted(load)
 .exa-local-billing-hint {
   margin: 0;
   font-size: 12px;
+}
+.key-base-url-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: normal;
 }
 .api-key-row > * { min-width: 0; }
 .api-key-row .row-icon-button {

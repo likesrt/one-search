@@ -253,6 +253,9 @@ func (s *Store) ProviderKeySettings(ctx context.Context, providerName string) (s
 	return strategy, maxConcurrency, err
 }
 
+// ListAvailableProviderKeys 返回指定渠道下当前可用于发起请求的密钥。
+// 过滤条件：渠道已启用、key 处于 enabled（或已过冷却期的 cooling）、未超日/月额度；
+// 返回结果含解密后的明文密钥与 key 级 BaseURL 覆盖值（空串表示回退渠道默认）。
 func (s *Store) ListAvailableProviderKeys(ctx context.Context, providerName string) ([]model.APIKey, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT k.id, k.provider_id, p.name, k.alias, k.key_ciphertext, k.key_hint,
@@ -261,6 +264,7 @@ func (s *Store) ListAvailableProviderKeys(ctx context.Context, providerName stri
 		       COALESCE((SELECT SUM(u.requests_total) FROM usage_daily u WHERE u.provider_key_id=k.id AND u.usage_date >= date_trunc('month', CURRENT_DATE)::date),0) AS monthly_used,
 		       COALESCE((SELECT SUM(m.quantity_total) FROM usage_meter_daily m WHERE m.provider_key_id=k.id AND m.provider_name=p.name AND m.unit='credits' AND m.usage_date >= date_trunc('month', CURRENT_DATE)::date),0)::float8 AS monthly_credits,
 		       k.max_concurrency,
+		       k.base_url,
 		       k.total_successes, k.total_failures, COALESCE(k.last_used_at, '0001-01-01'::timestamptz), COALESCE(k.cooldown_until, '0001-01-01'::timestamptz)
 		FROM provider_keys k
 		JOIN providers p ON p.id = k.provider_id
@@ -278,7 +282,7 @@ func (s *Store) ListAvailableProviderKeys(ctx context.Context, providerName stri
 	for rows.Next() {
 		var item model.APIKey
 		var ciphertext, exaServiceKeyCiphertext string
-		if err := rows.Scan(&item.ID, &item.ProviderID, &item.ProviderName, &item.Alias, &ciphertext, &item.KeyHint, &item.ExaAPIKeyID, &exaServiceKeyCiphertext, &item.ExaServiceKeyHint, &item.Status, &item.Weight, &item.RPMLimit, &item.DailyQuota, &item.MonthlyQuota, &item.MonthlyUsed, &item.MonthlyCredits, &item.MaxConcurrency, &item.TotalSuccesses, &item.TotalFailures, &item.LastUsedAt, &item.CooldownUntil); err != nil {
+		if err := rows.Scan(&item.ID, &item.ProviderID, &item.ProviderName, &item.Alias, &ciphertext, &item.KeyHint, &item.ExaAPIKeyID, &exaServiceKeyCiphertext, &item.ExaServiceKeyHint, &item.Status, &item.Weight, &item.RPMLimit, &item.DailyQuota, &item.MonthlyQuota, &item.MonthlyUsed, &item.MonthlyCredits, &item.MaxConcurrency, &item.BaseURL, &item.TotalSuccesses, &item.TotalFailures, &item.LastUsedAt, &item.CooldownUntil); err != nil {
 			return nil, err
 		}
 		plain, err := s.crypto.Decrypt(ciphertext)
@@ -298,6 +302,8 @@ func (s *Store) ListAvailableProviderKeys(ctx context.Context, providerName stri
 	return keys, rows.Err()
 }
 
+// GetAPIKeyByID 按主键读取单个渠道密钥（含解密后的明文与 key 级 BaseURL 覆盖值），
+// 供管理台「测试密钥」等绕过 keyPool 的场景使用；不存在时返回错误。
 func (s *Store) GetAPIKeyByID(ctx context.Context, id int64) (model.APIKey, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT k.id, k.provider_id, p.name, k.alias, k.key_ciphertext, k.key_hint,
@@ -306,6 +312,7 @@ func (s *Store) GetAPIKeyByID(ctx context.Context, id int64) (model.APIKey, erro
 		       COALESCE((SELECT SUM(u.requests_total) FROM usage_daily u WHERE u.provider_key_id=k.id AND u.usage_date >= date_trunc('month', CURRENT_DATE)::date),0) AS monthly_used,
 		       COALESCE((SELECT SUM(m.quantity_total) FROM usage_meter_daily m WHERE m.provider_key_id=k.id AND m.provider_name=p.name AND m.unit='credits' AND m.usage_date >= date_trunc('month', CURRENT_DATE)::date),0)::float8 AS monthly_credits,
 		       k.max_concurrency,
+		       k.base_url,
 		       k.total_successes, k.total_failures, COALESCE(k.last_used_at, '0001-01-01'::timestamptz), COALESCE(k.cooldown_until, '0001-01-01'::timestamptz)
 		FROM provider_keys k
 		JOIN providers p ON p.id = k.provider_id
@@ -313,7 +320,7 @@ func (s *Store) GetAPIKeyByID(ctx context.Context, id int64) (model.APIKey, erro
 	`, id)
 	var item model.APIKey
 	var ciphertext, exaServiceKeyCiphertext string
-	if err := row.Scan(&item.ID, &item.ProviderID, &item.ProviderName, &item.Alias, &ciphertext, &item.KeyHint, &item.ExaAPIKeyID, &exaServiceKeyCiphertext, &item.ExaServiceKeyHint, &item.Status, &item.Weight, &item.RPMLimit, &item.DailyQuota, &item.MonthlyQuota, &item.MonthlyUsed, &item.MonthlyCredits, &item.MaxConcurrency, &item.TotalSuccesses, &item.TotalFailures, &item.LastUsedAt, &item.CooldownUntil); err != nil {
+	if err := row.Scan(&item.ID, &item.ProviderID, &item.ProviderName, &item.Alias, &ciphertext, &item.KeyHint, &item.ExaAPIKeyID, &exaServiceKeyCiphertext, &item.ExaServiceKeyHint, &item.Status, &item.Weight, &item.RPMLimit, &item.DailyQuota, &item.MonthlyQuota, &item.MonthlyUsed, &item.MonthlyCredits, &item.MaxConcurrency, &item.BaseURL, &item.TotalSuccesses, &item.TotalFailures, &item.LastUsedAt, &item.CooldownUntil); err != nil {
 		return model.APIKey{}, err
 	}
 	plain, err := s.crypto.Decrypt(ciphertext)
@@ -331,9 +338,11 @@ func (s *Store) GetAPIKeyByID(ctx context.Context, id int64) (model.APIKey, erro
 	return item, nil
 }
 
+// ListProviderKeys 返回管理台所需的全部密钥视图（不含明文密钥），按渠道优先级与别名排序。
+// 视图字段中包含 key 级 BaseURL 覆盖值，供前端展示生效地址。
 func (s *Store) ListProviderKeys(ctx context.Context) ([]model.ProviderKeyView, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT k.id, k.provider_id, p.name, k.alias, k.key_hint, COALESCE(k.exa_api_key_id, ''), COALESCE(k.exa_service_key_hint, ''),
+		SELECT k.id, k.provider_id, p.name, k.alias, k.key_hint, k.base_url, COALESCE(k.exa_api_key_id, ''), COALESCE(k.exa_service_key_hint, ''),
 		       k.status, k.weight, k.rpm_limit, k.daily_quota, k.monthly_quota, k.max_concurrency, k.current_failures, k.total_successes,
 		       k.total_failures,
 		       COALESCE((SELECT SUM(u.requests_total) FROM usage_daily u WHERE u.provider_key_id=k.id AND u.usage_date=CURRENT_DATE), 0) AS daily_used,
@@ -358,7 +367,7 @@ func (s *Store) ListProviderKeys(ctx context.Context) ([]model.ProviderKeyView, 
 		var item model.ProviderKeyView
 		var balance, balanceUSD, usedUSD, totalQuantity float64
 		var hasBalance, hasBalanceUSD, hasUsedUSD, hasTotalQuantity bool
-		if err := rows.Scan(&item.ID, &item.ProviderID, &item.ProviderName, &item.Alias, &item.KeyHint, &item.ExaAPIKeyID, &item.ExaServiceKeyHint, &item.Status, &item.Weight, &item.RPMLimit, &item.DailyQuota, &item.MonthlyQuota, &item.MaxConcurrency, &item.CurrentFailures, &item.TotalSuccesses, &item.TotalFailures, &item.DailyUsed, &item.MonthlyUsed, &item.OfficialQuotaStatus, &item.OfficialQuotaMessage, &item.OfficialQuotaUnit, &balance, &hasBalance, &balanceUSD, &hasBalanceUSD, &usedUSD, &hasUsedUSD, &totalQuantity, &hasTotalQuantity, &item.OfficialQuotaAccountID, &item.OfficialQuotaCheckedAt, &item.CooldownUntil, &item.LastUsedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.ProviderID, &item.ProviderName, &item.Alias, &item.KeyHint, &item.BaseURL, &item.ExaAPIKeyID, &item.ExaServiceKeyHint, &item.Status, &item.Weight, &item.RPMLimit, &item.DailyQuota, &item.MonthlyQuota, &item.MaxConcurrency, &item.CurrentFailures, &item.TotalSuccesses, &item.TotalFailures, &item.DailyUsed, &item.MonthlyUsed, &item.OfficialQuotaStatus, &item.OfficialQuotaMessage, &item.OfficialQuotaUnit, &balance, &hasBalance, &balanceUSD, &hasBalanceUSD, &usedUSD, &hasUsedUSD, &totalQuantity, &hasTotalQuantity, &item.OfficialQuotaAccountID, &item.OfficialQuotaCheckedAt, &item.CooldownUntil, &item.LastUsedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if hasBalance {
@@ -378,7 +387,12 @@ func (s *Store) ListProviderKeys(ctx context.Context) ([]model.ProviderKeyView, 
 	return keys, rows.Err()
 }
 
-func (s *Store) CreateProviderKey(ctx context.Context, providerName, alias, plainKey, exaAPIKeyID, exaServiceKey string, weight, rpmLimit, dailyQuota, monthlyQuota, maxConcurrency int) (model.ProviderKeyView, error) {
+// CreateProviderKey 新建一个渠道密钥。
+// baseURL 为该 key 专属的基础 URL 覆盖值，空串表示回退到渠道的 base_url；
+// 它被放在字符串参数组末尾、int 参数组之前，避免与已有 5 个连续 int 参数发生瞬时对调。
+// weight 会经 clampWeight 夹紧，maxConcurrency 经 concurrencyOrDefault 兜底。
+// 返回新建后的完整视图（内部通过 ListProviderKeys 回查，避免重复拼装视图字段）。
+func (s *Store) CreateProviderKey(ctx context.Context, providerName, alias, plainKey, exaAPIKeyID, exaServiceKey, baseURL string, weight, rpmLimit, dailyQuota, monthlyQuota, maxConcurrency int) (model.ProviderKeyView, error) {
 	ciphertext, err := s.crypto.Encrypt(plainKey)
 	if err != nil {
 		return model.ProviderKeyView{}, err
@@ -394,10 +408,10 @@ func (s *Store) CreateProviderKey(ctx context.Context, providerName, alias, plai
 		exaServiceKeyHint = security.MaskSecret(strings.TrimSpace(exaServiceKey))
 	}
 	row := s.pool.QueryRow(ctx, `
-		INSERT INTO provider_keys (provider_id, alias, key_ciphertext, key_hint, exa_api_key_id, exa_service_key_ciphertext, exa_service_key_hint, weight, rpm_limit, daily_quota, monthly_quota, max_concurrency)
-		SELECT id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12 FROM providers WHERE name=$1
+		INSERT INTO provider_keys (provider_id, alias, key_ciphertext, key_hint, exa_api_key_id, exa_service_key_ciphertext, exa_service_key_hint, weight, rpm_limit, daily_quota, monthly_quota, max_concurrency, base_url)
+		SELECT id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13 FROM providers WHERE name=$1
 		RETURNING id
-	`, providerName, alias, ciphertext, keyHint, strings.TrimSpace(exaAPIKeyID), exaServiceKeyCiphertext, exaServiceKeyHint, clampWeight(weight), rpmLimit, dailyQuota, monthlyQuota, concurrencyOrDefault(maxConcurrency))
+	`, providerName, alias, ciphertext, keyHint, strings.TrimSpace(exaAPIKeyID), exaServiceKeyCiphertext, exaServiceKeyHint, clampWeight(weight), rpmLimit, dailyQuota, monthlyQuota, concurrencyOrDefault(maxConcurrency), strings.TrimSpace(baseURL))
 	var id int64
 	if err := row.Scan(&id); err != nil {
 		return model.ProviderKeyView{}, err
@@ -419,6 +433,9 @@ func (s *Store) UpdateProviderKeyStatus(ctx context.Context, id int64, status st
 	return err
 }
 
+// UpdateProviderKey 局部更新渠道密钥。patch 中为 nil 的字段保持原值；
+// base_url 使用 COALESCE 更新，因此传空串可清除覆盖（回退渠道默认），传 nil 则不动。
+// 更新成功后返回重新读取的完整视图。
 func (s *Store) UpdateProviderKey(ctx context.Context, id int64, patch model.ProviderKeyUpdate) (model.ProviderKeyView, error) {
 	var ciphertext interface{}
 	var keyHint interface{}
@@ -464,9 +481,10 @@ func (s *Store) UpdateProviderKey(ctx context.Context, id int64, patch model.Pro
 		    daily_quota=COALESCE($11::int, daily_quota),
 		    monthly_quota=COALESCE($12::int, monthly_quota),
 		    max_concurrency=COALESCE($13::int, max_concurrency),
+		    base_url=COALESCE($14::text, base_url),
 		    updated_at=now()
 		WHERE id=$1
-	`, id, stringPtrValue(patch.Alias), ciphertext, keyHint, exaAPIKeyID, exaServiceKeyCiphertext, exaServiceKeyHint, stringPtrValue(patch.Status), weight, intPtrValue(patch.RPMLimit), intPtrValue(patch.DailyQuota), intPtrValue(patch.MonthlyQuota), intPtrValue(patch.MaxConcurrency))
+	`, id, stringPtrValue(patch.Alias), ciphertext, keyHint, exaAPIKeyID, exaServiceKeyCiphertext, exaServiceKeyHint, stringPtrValue(patch.Status), weight, intPtrValue(patch.RPMLimit), intPtrValue(patch.DailyQuota), intPtrValue(patch.MonthlyQuota), intPtrValue(patch.MaxConcurrency), stringPtrValue(patch.BaseURL))
 	if err != nil {
 		return model.ProviderKeyView{}, err
 	}

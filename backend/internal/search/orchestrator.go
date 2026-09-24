@@ -345,11 +345,15 @@ func (o *Orchestrator) searchSingle(ctx context.Context, req model.SearchRequest
 	return []providerExecution{o.callProvider(ctx, req, req.Providers[0], providerConfigs, providerLimits, keyRetryCounts, providerTimeouts, providerProxies, retryableErrors)}
 }
 
+// callProvider 调用单个渠道，失败时按配置的重试次数换 key 重试。
+// 每次尝试都基于当前 key 重新构建 adapter：key 级 base_url 覆盖下不同 key 可能指向不同中转站，
+// adapter 因此不能跨 key 复用。返回的 providerExecution 记录实际使用的 key、各次尝试的错误类型与耗时。
 func (o *Orchestrator) callProvider(ctx context.Context, req model.SearchRequest, providerName string, providerConfigs map[string]model.ProviderConfig, providerLimits map[string]int, keyRetryCounts map[string]int, providerTimeouts map[string]int, providerProxies map[string]string, retryableErrors map[string]map[string]bool) providerExecution {
 	started := time.Now()
 	execution := providerExecution{provider: providerName, status: "error"}
-	adapter, ok := o.adapterForProvider(providerName, providerConfigs[providerName], providerTimeouts[providerName], providerProxies[providerName])
-	if !ok {
+	// 先校验渠道是否注册，再进入取 key 的循环：未注册渠道没有可用 adapter，
+	// 提前返回可避免消耗 key 池，也避免把「渠道不存在」的失败记到 key 上。
+	if !o.providerRegistered(providerName) {
 		err := &provider.Error{Type: provider.ErrorTypeUpstream, Message: "provider is not registered"}
 		execution.err = err
 		execution.errorType = provider.ErrorType(err)
@@ -392,6 +396,26 @@ func (o *Orchestrator) callProvider(ctx context.Context, req model.SearchRequest
 				Status:       "error",
 				ErrorType:    execution.errorType,
 				Err:          err,
+				LatencyMS:    time.Since(attemptStarted).Milliseconds(),
+			})
+			return execution
+		}
+		// adapter 必须按当前 key 构建：key 可覆盖 base_url，同一渠道的不同 key 可能指向不同中转站。
+		adapter, ok := o.adapterForProvider(providerName, providerConfigs[providerName], key.BaseURL, providerTimeouts[providerName], providerProxies[providerName])
+		if !ok {
+			// 注册性已在上方校验过，这里是防御性兜底；key 已经取出，必须释放以免并发计数泄漏。
+			registrationErr := &provider.Error{Type: provider.ErrorTypeUpstream, Message: "provider is not registered"}
+			release(false, registrationErr)
+			execution.err = registrationErr
+			execution.errorType = provider.ErrorType(registrationErr)
+			execution.latencyMS = time.Since(started).Milliseconds()
+			execution.attempts = append(execution.attempts, providerAttempt{
+				Key:          key,
+				KeyAlias:     key.Alias,
+				AttemptIndex: attemptIndex,
+				Status:       "error",
+				ErrorType:    execution.errorType,
+				Err:          registrationErr,
 				LatencyMS:    time.Since(attemptStarted).Milliseconds(),
 			})
 			return execution
@@ -719,8 +743,21 @@ func providerConfigMap(providers []model.ProviderConfig) map[string]model.Provid
 	return items
 }
 
-func (o *Orchestrator) adapterForProvider(name string, cfg model.ProviderConfig, timeoutMS int, proxyURL string) (provider.Provider, bool) {
-	providerCfg := provider.Config{BaseURL: strings.TrimSpace(cfg.BaseURL), ProxyURL: proxyURL}
+// resolveBaseURL 解析生效的基础 URL：key 级覆盖优先，为空（含纯空白）时回退到渠道默认值。
+// 两侧都会 TrimSpace，避免把只有空白的配置当成有效覆盖。
+func resolveBaseURL(keyBaseURL string, providerBaseURL string) string {
+	if trimmed := strings.TrimSpace(keyBaseURL); trimmed != "" {
+		return trimmed
+	}
+	return strings.TrimSpace(providerBaseURL)
+}
+
+// adapterForProvider 按渠道名构建适配器。
+// keyBaseURL 是当前 key 的基础 URL 覆盖值（可为空，此时使用 cfg.BaseURL）；
+// timeoutMS 为渠道级超时覆盖，<=0 时回退 cfg.TimeoutMS；proxyURL 为渠道代理地址。
+// 渠道未注册工厂时回退到已注册的实例；两者都不存在时返回 false。
+func (o *Orchestrator) adapterForProvider(name string, cfg model.ProviderConfig, keyBaseURL string, timeoutMS int, proxyURL string) (provider.Provider, bool) {
+	providerCfg := provider.Config{BaseURL: resolveBaseURL(keyBaseURL, cfg.BaseURL), ProxyURL: proxyURL}
 	if timeoutMS <= 0 {
 		timeoutMS = cfg.TimeoutMS
 	}
@@ -731,6 +768,17 @@ func (o *Orchestrator) adapterForProvider(name string, cfg model.ProviderConfig,
 		return adapter, true
 	}
 	return o.registry.Get(name)
+}
+
+// providerRegistered 报告渠道是否已注册（工厂或实例任一存在）。
+// 复用 Registry 既有的 Names() 只读接口；渠道数量固定且很少，这里线性判断的开销可忽略。
+func (o *Orchestrator) providerRegistered(name string) bool {
+	for _, item := range o.registry.Names() {
+		if item == name {
+			return true
+		}
+	}
+	return false
 }
 
 func providerSettingsFromProviders(providers []model.ProviderConfig) map[string]map[string]interface{} {
@@ -1130,6 +1178,10 @@ func firstError(executions []providerExecution) string {
 	return ""
 }
 
+// TestProviderKey 用指定密钥发起一次真实搜索，供管理台「测试密钥」使用。
+// 它绕过 keyPool 直接持有完整 APIKey，因此必须同样传入 key.BaseURL，
+// 否则测试打的是渠道默认地址，与生产行为不一致；调用结果会写回 key 的成功/失败统计。
+// query 为空时使用内置示例词，limit<=0 时取 3；失败时同时返回 summary 与 error。
 func (o *Orchestrator) TestProviderKey(ctx context.Context, keyID int64, query string, limit int) (model.ProviderCallSummary, []model.SearchResult, error) {
 	if query == "" {
 		query = "latest AI search API news"
@@ -1146,7 +1198,7 @@ func (o *Orchestrator) TestProviderKey(ctx context.Context, keyID int64, query s
 		return model.ProviderCallSummary{}, nil, err
 	}
 	providerConfigByName := providerConfigMap(providerConfigs)
-	adapter, ok := o.adapterForProvider(key.ProviderName, providerConfigByName[key.ProviderName], 0, "")
+	adapter, ok := o.adapterForProvider(key.ProviderName, providerConfigByName[key.ProviderName], key.BaseURL, 0, "")
 	if !ok {
 		err := &provider.Error{Type: provider.ErrorTypeUpstream, Message: "provider is not registered"}
 		return model.ProviderCallSummary{Provider: key.ProviderName, KeyAlias: key.Alias, Status: "error", ErrorType: provider.ErrorType(err), Error: err.Error()}, nil, err

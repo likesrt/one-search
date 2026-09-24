@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,6 +77,9 @@ type orchestratorTestKeyPool struct {
 	mu       sync.Mutex
 	acquired []string
 	excluded [][]int64
+	// baseURLs 按 Acquire 顺序提供 key 级基础 URL 覆盖值，用于模拟不同 key 指向不同中转站；
+	// 元素不足时 key.BaseURL 为空，即回退渠道默认地址。
+	baseURLs []string
 }
 
 func (p *orchestratorTestKeyPool) Acquire(ctx context.Context, providerName string, excludeIDs ...int64) (model.APIKey, func(bool, error), error) {
@@ -81,8 +87,13 @@ func (p *orchestratorTestKeyPool) Acquire(ctx context.Context, providerName stri
 	defer p.mu.Unlock()
 	p.acquired = append(p.acquired, providerName)
 	p.excluded = append(p.excluded, append([]int64(nil), excludeIDs...))
+	index := len(p.acquired) - 1
 	id := int64(len(p.acquired))
-	return model.APIKey{ID: id, ProviderName: providerName, Alias: providerName + "-key", Value: "test-key"}, func(bool, error) {}, nil
+	baseURL := ""
+	if index < len(p.baseURLs) {
+		baseURL = p.baseURLs[index]
+	}
+	return model.APIKey{ID: id, ProviderName: providerName, Alias: providerName + "-key", Value: "test-key", BaseURL: baseURL}, func(bool, error) {}, nil
 }
 
 type orchestratorTestProvider struct {
@@ -584,5 +595,149 @@ func TestSearchFallbackSkipsFailedProvider(t *testing.T) {
 	}
 	if len(resp.Providers) != 2 {
 		t.Fatalf("expected both provider summaries, got %+v", resp.Providers)
+	}
+}
+
+// resolveBaseURL 的解析优先级：key 级覆盖 -> 渠道默认，且两侧都做 TrimSpace。
+func TestResolveBaseURL(t *testing.T) {
+	cases := []struct {
+		name             string
+		keyBaseURL       string
+		providerBaseURL  string
+		want             string
+	}{
+		{name: "key 覆盖优先并去除空白", keyBaseURL: "  https://key.example.com/res/v1  ", providerBaseURL: "https://provider.example.com", want: "https://key.example.com/res/v1"},
+		{name: "key 为空串回退渠道", keyBaseURL: "", providerBaseURL: "https://provider.example.com", want: "https://provider.example.com"},
+		{name: "key 为纯空白回退渠道", keyBaseURL: "   ", providerBaseURL: "  https://provider.example.com  ", want: "https://provider.example.com"},
+		{name: "两者都为空", keyBaseURL: "", providerBaseURL: "", want: ""},
+	}
+	for _, tc := range cases {
+		if got := resolveBaseURL(tc.keyBaseURL, tc.providerBaseURL); got != tc.want {
+			t.Fatalf("%s: resolveBaseURL(%q, %q) = %q, want %q", tc.name, tc.keyBaseURL, tc.providerBaseURL, got, tc.want)
+		}
+	}
+}
+
+// newTavilyStubServer 起一个只接受 POST /search 的 stub 服务，返回给定标题的 Tavily 格式结果。
+// status >= 400 时返回 {"error":"boom"}（不含 quota/credit 字样，保证被归类为可重试的 upstream）。
+// hits 用于断言请求实际打到了哪个地址。
+func newTavilyStubServer(t *testing.T, title string, status int, hits *int32) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(hits, 1)
+		if r.Method != http.MethodPost || r.URL.Path != "/search" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if status >= http.StatusBadRequest {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error":"boom"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"results": []map[string]interface{}{
+				{"title": title, "url": "https://example.com/" + title, "content": "stub content"},
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// newKeyBaseURLTestOrchestrator 构造一个注册了真实 Tavily 工厂的 orchestrator，
+// 使 base_url 解析结果真正作用到 HTTP 请求地址上（而非被假 provider 吞掉）。
+// providerBaseURL 是渠道默认地址，retryCount 是渠道的 key_retry_count。
+func newKeyBaseURLTestOrchestrator(keyPool KeyPool, providerBaseURL string, retryCount int) *Orchestrator {
+	registry := provider.NewRegistry()
+	registry.RegisterFactory(model.ProviderTavily, func(cfg provider.Config) provider.Provider {
+		return provider.NewTavilyProvider(cfg)
+	})
+	store := &orchestratorTestStore{
+		settings: model.RuntimeSettings{
+			DefaultMode: model.SearchModeSingle, DefaultProviders: []string{model.ProviderTavily},
+			DefaultLimit: 5, DefaultDedupe: false, RequestTimeoutMS: 2000, CacheEnabled: false,
+		},
+		providers: []model.ProviderConfig{
+			{
+				Name: model.ProviderTavily, Enabled: true, Priority: 1, Weight: 1, TimeoutMS: 1000,
+				BaseURL:  providerBaseURL,
+				Settings: map[string]interface{}{"key_retry_count": retryCount},
+			},
+		},
+	}
+	return NewOrchestrator(registry, keyPool, store)
+}
+
+// keyBaseURLTestRequest 返回一个只查 Tavily 的显式单渠道请求。
+func keyBaseURLTestRequest() model.SearchRequest {
+	return model.SearchRequest{
+		Query: "q", Providers: []string{model.ProviderTavily}, ProvidersExplicit: true,
+		Mode: model.SearchModeSingle,
+	}
+}
+
+// key 配置了 base_url 时必须打到该地址，而不是渠道默认地址。
+func TestSearchUsesKeyBaseURLOverride(t *testing.T) {
+	var providerHits, keyHits int32
+	providerServer := newTavilyStubServer(t, "provider-default", http.StatusOK, &providerHits)
+	keyServer := newTavilyStubServer(t, "key-override", http.StatusOK, &keyHits)
+
+	keyPool := &orchestratorTestKeyPool{baseURLs: []string{keyServer.URL}}
+	orch := newKeyBaseURLTestOrchestrator(keyPool, providerServer.URL, 0)
+	resp, err := orch.Search(context.Background(), keyBaseURLTestRequest(), "req-key-base-url", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Title != "key-override" {
+		t.Fatalf("results = %+v, want result from key base_url stub", resp.Results)
+	}
+	if got := atomic.LoadInt32(&keyHits); got != 1 {
+		t.Fatalf("key base_url stub hits = %d, want 1", got)
+	}
+	if got := atomic.LoadInt32(&providerHits); got != 0 {
+		t.Fatalf("provider default base_url hits = %d, want 0", got)
+	}
+}
+
+// key 未配置 base_url 时必须回退到渠道默认地址。
+func TestSearchFallsBackToProviderBaseURL(t *testing.T) {
+	var providerHits int32
+	providerServer := newTavilyStubServer(t, "provider-default", http.StatusOK, &providerHits)
+
+	keyPool := &orchestratorTestKeyPool{}
+	orch := newKeyBaseURLTestOrchestrator(keyPool, providerServer.URL, 0)
+	resp, err := orch.Search(context.Background(), keyBaseURLTestRequest(), "req-provider-base-url", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Title != "provider-default" {
+		t.Fatalf("results = %+v, want result from provider default base_url", resp.Results)
+	}
+	if got := atomic.LoadInt32(&providerHits); got != 1 {
+		t.Fatalf("provider default base_url hits = %d, want 1", got)
+	}
+}
+
+// 重试换 key 时必须按新 key 重建 adapter：两个 key 指向不同中转站，第一次失败后第二次要打到新地址。
+func TestSearchRebuildsAdapterPerKeyBaseURL(t *testing.T) {
+	var firstHits, secondHits int32
+	firstServer := newTavilyStubServer(t, "first-key", http.StatusInternalServerError, &firstHits)
+	secondServer := newTavilyStubServer(t, "second-key", http.StatusOK, &secondHits)
+
+	keyPool := &orchestratorTestKeyPool{baseURLs: []string{firstServer.URL, secondServer.URL}}
+	// 渠道默认地址不可达：若 adapter 未按 key 重建，请求不会命中第二个 stub。
+	orch := newKeyBaseURLTestOrchestrator(keyPool, "http://127.0.0.1:1", 1)
+	resp, err := orch.Search(context.Background(), keyBaseURLTestRequest(), "req-key-base-url-retry", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Title != "second-key" {
+		t.Fatalf("results = %+v, want result from second key base_url", resp.Results)
+	}
+	if got := atomic.LoadInt32(&firstHits); got != 1 {
+		t.Fatalf("first key base_url hits = %d, want 1", got)
+	}
+	if got := atomic.LoadInt32(&secondHits); got != 1 {
+		t.Fatalf("second key base_url hits = %d, want 1", got)
 	}
 }
