@@ -19,3 +19,4 @@ frontend/dist/
 coverage/
 .pi-subagents/
 docs/
+data/
