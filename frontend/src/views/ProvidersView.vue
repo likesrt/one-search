@@ -106,7 +106,7 @@
               <section class="channel-section compact-bottom">
                 <div class="section-line-header">
                   <div>API 密钥 ({{ selectedKeys.length }})</div>
-                  <el-tooltip content="添加密钥" placement="top">
+                  <el-tooltip :content="creatingRow ? '请先保存或取消当前新增的密钥' : '添加密钥'" placement="top">
                     <el-button link :icon="Plus" :disabled="creatingRow" aria-label="添加密钥" @click="startCreateKey" />
                   </el-tooltip>
                 </div>
@@ -129,7 +129,8 @@
                           class="key-input"
                           :placeholder="keyBaseURLPlaceholder"
                         />
-                        <p class="muted key-base-url-hint">{{ KEY_BASE_URL_HINT }}</p>
+                        <p class="muted key-base-url-hint">{{ keyBaseURLHint }}</p>
+                        <p v-if="shouldWarnCustomBaseURL(draftKeyBaseURL)" class="muted key-base-url-hint">{{ KEY_BASE_URL_HINT_CUSTOM }}</p>
                       </div>
                       <div class="new-key-actions">
                         <el-tooltip content="保存密钥" placement="top">
@@ -142,7 +143,10 @@
                     </template>
                     <template v-else>
                       <div class="key-main">
-                        <el-input class="key-input" :model-value="row.key_hint || '已保存密钥'" readonly />
+                        <div class="key-title">
+                          <span class="key-alias" :title="row.alias">{{ row.alias }}</span>
+                          <span class="key-hint-text">{{ row.key_hint || '已保存密钥' }}</span>
+                        </div>
                         <div class="key-meta">
                           <span>权重 {{ row.weight }}</span>
                           <span>成功 {{ row.total_successes }}</span>
@@ -321,10 +325,15 @@
         <el-form-item label="别名"><el-input v-model="keyForm.alias" /></el-form-item>
         <el-form-item label="基础 URL（选填)">
           <el-input v-model="keyForm.base_url" :placeholder="keyBaseURLPlaceholder" />
-          <div class="key-base-url-hint muted">{{ KEY_BASE_URL_HINT }}</div>
+          <div class="key-base-url-hint muted">{{ keyBaseURLHint }}</div>
+          <div v-if="shouldWarnCustomBaseURL(keyForm.base_url)" class="key-base-url-hint muted">{{ KEY_BASE_URL_HINT_CUSTOM }}</div>
         </el-form-item>
         <el-form-item label="权重（1-10000，越大越优先）">
           <el-input-number v-model="keyForm.weight" :min="1" :max="10000" controls-position="right" />
+        </el-form-item>
+        <el-form-item v-if="editingKey?.provider_name === 'exa'" label="Exa 管理密钥（选填)">
+          <el-input v-model="keyForm.exa_service_key" type="password" show-password :placeholder="editingKey?.exa_service_key_hint ? '留空则不修改现有管理密钥' : '未配置，留空则使用本地计算费用模式'" />
+          <div class="key-base-url-hint muted">用于查询 Exa 官方额度；留空不修改现状（当前：{{ editingKey?.exa_service_key_hint ? '已配置 ' + editingKey.exa_service_key_hint : '未配置，按本地计费估算' }}）</div>
         </el-form-item>
         <el-form-item label="每分钟限制（0 表示不限）">
           <el-input-number v-model="keyForm.rpm_limit" :min="0" controls-position="right" />
@@ -368,7 +377,7 @@ const creatingRow = ref(false)
 const keyDialog = ref(false)
 const editingKey = ref<EditableKey | null>(null)
 const savingKey = ref(false)
-const keyForm = reactive({ alias: '', weight: 1, rpm_limit: 0, daily_quota: 0, monthly_quota: 0, base_url: '' })
+const keyForm = reactive({ alias: '', weight: 1, rpm_limit: 0, daily_quota: 0, monthly_quota: 0, base_url: '', exa_service_key: '' })
 const draftKey = ref('')
 const draftExaServiceKey = ref('')
 const draftKeyBaseURL = ref('')
@@ -477,12 +486,37 @@ const providerProxyURL = computed<string>({
   }
 })
 
-// key 级基础 URL 的填写说明：覆盖值是整段替换根，Brave 默认带 /res/v1 前缀，写漏会 404。
-const KEY_BASE_URL_HINT = '留空则使用渠道默认地址；Brave 默认含 /res/v1 路径前缀，指向中转站时需写全，否则会 404'
+// key 级基础 URL 的填写说明按渠道区分：只有 Brave 的默认地址带路径前缀
+// （https://api.search.brave.com/res/v1），覆盖时必须写全否则 404；
+// 其余 6 家默认地址是纯 host，不需要这段警告。
+const KEY_BASE_URL_HINT_BASE = '留空则使用渠道默认地址'
+const KEY_BASE_URL_HINT_BRAVE = '留空则使用渠道默认地址；Brave 默认含 /res/v1 路径前缀，指向中转站时需写全，否则会 404'
+// 自定义地址意味着请求不走官方端点，而官方额度查询接口硬编码各家官方域名
+// （见后端 quota.go），因此额度查询结果不再对应该 key 的实际通道，回退本地计费。
+const KEY_BASE_URL_HINT_CUSTOM = '使用自定义地址后，官方额度查询不再适用（它只请求官方端点），该 Key 将按本地计费配置估算费用'
+
+const keyBaseURLHint = computed(() => {
+  const provider = providerForm.value?.name
+  return provider === 'brave' ? KEY_BASE_URL_HINT_BRAVE : KEY_BASE_URL_HINT_BASE
+})
+
 const keyBaseURLPlaceholder = computed(() => {
   const fallback = providerForm.value?.base_url?.trim()
   return fallback ? `留空使用渠道默认：${fallback}` : '留空使用渠道默认地址'
 })
+
+/**
+ * 判断是否应展示"自定义地址导致官方额度查询失效"的提示。
+ * 该提示只在当前编辑的地址非空、且与渠道默认地址不同时才有意义：
+ * 地址为空表示回退渠道默认，走官方端点，额度查询依然有效。
+ * @param baseURL 当前输入框中的基础 URL（可为空）
+ * @returns 需要展示提示时为 true
+ */
+function shouldWarnCustomBaseURL(baseURL: string) {
+  const value = baseURL.trim()
+  if (!value) return false
+  return value !== (providerForm.value?.base_url?.trim() || '')
+}
 const providerPricePerRequest = computed<number>({
   get() {
     const defaults = defaultPricingFor(providerForm.value?.name || '')
@@ -736,6 +770,9 @@ function openKeyEdit(row: EditableKey) {
   keyForm.daily_quota = row.daily_quota || 0
   keyForm.monthly_quota = row.monthly_quota || 0
   keyForm.base_url = row.base_url || ''
+  // 管理密钥已加密存储、列表只返回脱敏 hint，因此这里恒为空串：
+  // 后端对空串的语义是"不修改"，正好让用户按需覆盖而不会误清除。
+  keyForm.exa_service_key = ''
   keyDialog.value = true
 }
 
@@ -747,7 +784,7 @@ async function saveKey() {
   if (baseURLProblem) { ElMessage.warning(baseURLProblem); return }
   savingKey.value = true
   try {
-    await api.updateKey(editingKey.value.id, {
+    const payload: Record<string, unknown> = {
       alias: keyForm.alias.trim(),
       weight: keyForm.weight,
       rpm_limit: keyForm.rpm_limit,
@@ -755,7 +792,15 @@ async function saveKey() {
       monthly_quota: keyForm.monthly_quota,
       // 空串是有效值：表示清除 key 级覆盖、回退渠道默认地址
       base_url: keyForm.base_url.trim()
-    })
+    }
+    // exa_service_key 只在填写时才放进 payload：后端把空串视为"不修改"，
+    // 而列表接口只返回脱敏 hint、拿不到原值，无条件发送空串虽无害但语义含糊。
+    const exaServiceKey = keyForm.exa_service_key.trim()
+    if (editingKey.value.provider_name === 'exa' && exaServiceKey) {
+      payload.exa_service_key = exaServiceKey
+    }
+    // 一次性提交，避免分两次请求导致"别名已改、管理密钥失败"的半更新状态。
+    await api.updateKey(editingKey.value.id, payload)
     ElMessage.success('密钥已保存')
     keyDialog.value = false
     await load()
@@ -1046,6 +1091,29 @@ onMounted(load)
 .key-main {
   min-width: 0;
   overflow: hidden;
+}
+/* 别名是用户给 key 起的名字，作为主标识显示；脱敏密钥退为次要信息。 */
+.key-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.key-alias {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.key-hint-text {
+  font-size: 12px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .key-status-reason {
   display: inline-flex;

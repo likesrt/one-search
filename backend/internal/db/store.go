@@ -356,7 +356,8 @@ func (s *Store) ListProviderKeys(ctx context.Context) ([]model.ProviderKeyView, 
 		       k.cooldown_until, k.last_used_at, k.created_at, k.updated_at
 		FROM provider_keys k
 		JOIN providers p ON p.id = k.provider_id
-		ORDER BY p.priority ASC, k.alias ASC
+		WHERE k.status <> 'deleted'
+		ORDER BY p.priority ASC, k.id DESC
 	`)
 	if err != nil {
 		return nil, err
@@ -504,6 +505,11 @@ func (s *Store) GetProviderKey(ctx context.Context, id int64) (model.ProviderKey
 	return model.ProviderKeyView{}, pgx.ErrNoRows
 }
 
+// DeleteProviderKey 软删除一个渠道密钥：清除其用量记录，但保留密钥行本身并标记 status='deleted'。
+// 之所以不物理删除：provider_calls / provider_call_usage 通过外键引用本表且是 ON DELETE SET NULL，
+// 物理删除会让历史调用日志丢失与密钥的关联，审计时无法追溯是哪把密钥产生的调用。
+// 用量记录仍按原语义物理删除，否则会残留成 provider_key_id 为空的行，被网关级汇总统计计入。
+// 两步必须在同一事务内：先删用量再改状态，避免中途失败留下"已删用量但仍可用"的不一致状态。
 func (s *Store) DeleteProviderKey(ctx context.Context, id int64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -513,7 +519,10 @@ func (s *Store) DeleteProviderKey(ctx context.Context, id int64) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM usage_daily WHERE provider_key_id=$1`, id); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM provider_keys WHERE id=$1`, id); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM usage_meter_daily WHERE provider_key_id=$1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE provider_keys SET status='deleted', updated_at=now() WHERE id=$1`, id); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -538,7 +547,7 @@ func (s *Store) UpdateProviderKeyOfficialQuota(ctx context.Context, id int64, qu
 		    official_quota_checked_at=$10,
 		    status=CASE WHEN $11 THEN 'exhausted' ELSE status END,
 		    updated_at=now()
-		WHERE id=$1
+		WHERE id=$1 AND status <> 'deleted'
 	`, id, quota.Status, message, quota.Unit, floatPtrValue(quota.Balance), floatPtrValue(quota.BalanceUSD), floatPtrValue(quota.TotalCostUSD), floatPtrValue(quota.TotalQuantity), quota.AccountID, quota.FetchedAt, exhausted)
 	return err
 }
@@ -580,7 +589,7 @@ func (s *Store) RecordKeyResult(ctx context.Context, key model.APIKey, success b
 		    cooldown_until=$4,
 		    last_used_at=now(),
 		    updated_at=now()
-		WHERE id=$1
+		WHERE id=$1 AND status <> 'deleted'
 	`, key.ID, status, success, cooldown)
 	return err
 }
@@ -1101,7 +1110,7 @@ func (s *Store) ProviderHealth(ctx context.Context, windowMinutes int) ([]model.
 		       COUNT(k.id) FILTER (WHERE k.status='disabled')::int,
 		       COUNT(k.id) FILTER (WHERE k.status='cooling')::int
 		FROM providers p
-		LEFT JOIN provider_keys k ON k.provider_id=p.id
+		LEFT JOIN provider_keys k ON k.provider_id=p.id AND k.status <> 'deleted'
 		GROUP BY p.id
 		ORDER BY p.priority ASC, p.name ASC
 	`)
