@@ -231,6 +231,34 @@ export interface RuntimeSettings {
   search_logs_limit: number
 }
 
+/** 网页抓取功能的全局配置，对应后端 settings 表的 key='fetch'。 */
+export interface FetchSettings {
+  /** 关闭时 /v1/fetch 返回 404，且 MCP 工具清单不再列出 fetch */
+  enabled: boolean
+  /** 代理地址，空串表示直连；容器部署时 127.0.0.1 / localhost 会被后端改写为 host.docker.internal */
+  proxy_url: string
+  /** 放行内网与环回目标；公网部署必须为 false，否则等于开放 SSRF 跳板 */
+  allow_private: boolean
+  /** 单次抓取超时（毫秒），上界 60000（受反向代理 65s 超时约束） */
+  timeout_ms: number
+}
+
+/** 单次抓取的结果，对应后端 fetch.Result。 */
+export interface FetchResult {
+  url: string
+  method: string
+  /** 上游响应状态码：抓到 4xx/5xx 页面本身仍算成功抓取，状态码在此透出 */
+  status_code: number
+  content_type: string
+  /** 归一化并按 max_length 截断后的内容（含续读提示） */
+  content: string
+  truncated: boolean
+  /** 续读起点，仅在 truncated 为 true 时有意义 */
+  next_start_index: number
+  /** 归一化后完整内容的字符数 */
+  total_length: number
+}
+
 export interface SearchLog {
   id: number
   request_id: string
@@ -309,6 +337,12 @@ export const api = {
   updateSettings: (payload: RuntimeSettings) => apiFetch<RuntimeSettings>('/api/admin/settings', { method: 'PUT', body: JSON.stringify(payload) }),
   adminAPIKey: () => apiFetch<AdminAPIKey>('/api/admin/settings/admin-api-key'),
   rotateAdminAPIKey: () => apiFetch<AdminAPIKey>('/api/admin/settings/admin-api-key', { method: 'POST' }),
+  /** 读取「网页抓取」功能配置；后端始终返回带默认值的完整结构 */
+  fetchSettings: () => apiFetch<FetchSettings>('/api/admin/fetch/settings'),
+  /** 保存「网页抓取」功能配置；回包为入库后的配置，可用作前端脏检查基线 */
+  updateFetchSettings: (payload: FetchSettings) => apiFetch<FetchSettings>('/api/admin/fetch/settings', { method: 'PUT', body: JSON.stringify(payload) }),
+  /** 管理台试抓；参数与 /v1/fetch 的 POST 形态一致，失败时抛出带原因的错误 */
+  testFetch: (payload: Record<string, unknown>) => apiFetch<FetchResult>('/api/admin/fetch/test', { method: 'POST', body: JSON.stringify(payload) }),
   logs: (limit?: number) => apiFetch<{ logs: SearchLog[] }>(limit == null ? '/api/admin/logs' : `/api/admin/logs?limit=${Math.max(1, Math.min(limit, 1000))}`),
   logDetail: (id: number) => apiFetch<{ log: SearchLog; calls: ProviderCallLog[] }>('/api/admin/logs/' + id),
   usageSummary: () => apiFetch<UsageSummary>('/api/admin/usage/summary'),

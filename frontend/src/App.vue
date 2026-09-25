@@ -12,6 +12,10 @@
           <el-icon><Search /></el-icon>
           <span>搜索调试</span>
         </el-menu-item>
+        <el-menu-item index="/fetch" title="网页抓取">
+          <el-icon><Link /></el-icon>
+          <span>网页抓取</span>
+        </el-menu-item>
         <el-menu-item index="/" title="仪表盘">
           <el-icon><Odometer /></el-icon>
           <span>仪表盘</span>
@@ -71,6 +75,7 @@ import {
   Document,
   Grid,
   Key,
+  Link,
   List,
   Odometer,
   Reading,

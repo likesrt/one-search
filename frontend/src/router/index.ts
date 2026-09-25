@@ -6,6 +6,7 @@ const DashboardView = () => import('../views/DashboardView.vue')
 const ProvidersView = () => import('../views/ProvidersView.vue')
 const TokensView = () => import('../views/TokensView.vue')
 const PlaygroundView = () => import('../views/PlaygroundView.vue')
+const FetchView = () => import('../views/FetchView.vue')
 const LogsView = () => import('../views/LogsView.vue')
 const AuditLogsView = () => import('../views/AuditLogsView.vue')
 const SettingsView = () => import('../views/SettingsView.vue')
@@ -20,6 +21,8 @@ const router = createRouter({
     { path: '/keys', redirect: '/providers' },
     { path: '/tokens', component: TokensView },
     { path: '/playground', component: PlaygroundView },
+    // 刻意不设 meta.public：抓取配置含代理与内网放行开关，必须与其余功能页一样先登录
+    { path: '/fetch', component: FetchView },
     { path: '/logs', component: LogsView },
     { path: '/audit', component: AuditLogsView },
     { path: '/usage', redirect: '/' },
