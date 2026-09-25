@@ -11,10 +11,13 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/one-search/one-search/backend/internal/compat"
+	"github.com/one-search/one-search/backend/internal/fetch"
 	"github.com/one-search/one-search/backend/internal/model"
 	"github.com/one-search/one-search/backend/internal/search"
 )
@@ -38,6 +41,8 @@ type AppStore interface {
 	GetAdminAPIKey(ctx context.Context) (model.AdminAPIKey, error)
 	RotateAdminAPIKey(ctx context.Context) (model.AdminAPIKey, string, error)
 	UpdateRuntimeSettings(ctx context.Context, settings model.RuntimeSettings) error
+	FetchSettings(ctx context.Context) (model.FetchSettings, error)
+	UpdateFetchSettings(ctx context.Context, settings model.FetchSettings) error
 	ListSearchLogs(ctx context.Context, limit int) ([]model.SearchLog, error)
 	GetSearchLog(ctx context.Context, id int64) (model.SearchLog, []model.ProviderCallLog, error)
 	GetSearchLogByRequestID(ctx context.Context, requestID string) (model.SearchLog, []model.ProviderCallLog, error)
@@ -62,6 +67,23 @@ type Handler struct {
 	log          requestLogger
 	mcpEnabled   bool
 	mcpPath      string
+
+	// fetchEnabled 是本进程内「网页抓取功能是否启用」的快照，取值为 1（启用）或 0。
+	//
+	// 刻意用内存标志而不是每次查库：MCP 的 tools/list 与 tools/call 都要读它，
+	// 而 mcp_test.go 等既有测试用零值 &Handler{} 构造（store 为 nil），查库会 panic。
+	//
+	// 用 atomic 而非普通 bool：写入发生在启动期（EnableFetch）与运行期
+	// （每次 REST 抓取或管理台读写配置后的同步），读取发生在并发的 MCP 请求里，
+	// 普通字段会构成数据竞争。Go 1.18 没有 atomic.Bool，故用 int32。
+	fetchEnabled int32
+	// fetchMu 保护 fetcher 与 fetcherKey，二者必须成对读写
+	fetchMu sync.Mutex
+	// fetcher 是按配置指纹缓存的抓取执行体，nil 表示尚未构建；
+	// 缓存而非每次重建是因为 Fetcher 持有连接池，重建会丢弃连接复用
+	fetcher *fetch.Fetcher
+	// fetcherKey 是构建 fetcher 时所用配置的指纹，变化时才重建
+	fetcherKey string
 }
 
 func NewHandler(store AppStore, auth *AuthService, orchestrator *search.Orchestrator) *Handler {
@@ -95,23 +117,84 @@ func (h *Handler) EnableMCP(path string) {
 	}
 }
 
-func (h *Handler) Mount(r chi.Router) {
-	if h.mcpEnabled {
-		h.mountMCP(r, h.mcpPath)
-		if h.mcpPath != "/v1/mcp" {
-			h.mountMCP(r, "/v1/mcp")
-		}
-	}
+// EnableFetch 设置进程内「网页抓取」功能的启用标志。
+//
+// 与 EnableMCP 同构：只置内存标志，不查库；由 main.go 在启动期按数据库里的配置调用一次。
+// MCP 侧据此决定 tools/list 是否列出 fetch、tools/call 是否接受 fetch
+// （工具清单不是调用授权，两处必须共用同一判定）。
+//
+// 运行期该标志会被 fetchSettings 按数据库最新值刷新，因此管理台改完配置后立即生效。
+//
+// 参数 enabled 为启动期的配置值；调用时机应在服务开始处理请求之前。
+// 副作用：修改 Handler 的内存状态（原子写，可与并发的 MCP 读取共存）。
+func (h *Handler) EnableFetch(enabled bool) {
+	h.setFetchEnabled(enabled)
+}
 
+// setFetchEnabled 原子写入抓取启用标志，供启动期与运行期两条路径共用。
+// 运行期写入来自 fetchSettings（读到最新配置后同步），因此管理台改配置后 MCP 立即跟上。
+func (h *Handler) setFetchEnabled(enabled bool) {
+	var value int32
+	if enabled {
+		value = 1
+	}
+	atomic.StoreInt32(&h.fetchEnabled, value)
+}
+
+// isFetchEnabled 原子读取抓取启用标志，供 MCP 侧的清单与调用判定使用。
+func (h *Handler) isFetchEnabled() bool {
+	return atomic.LoadInt32(&h.fetchEnabled) == 1
+}
+
+// Mount 把所有路由挂到给定 router 上。
+//
+// 分三段：MCP（可选，含兼容路径）、对外 /v1 接口、管理台 /api/admin 接口。
+// 只有 MCP 挂载受 h.mcpEnabled 控制；/v1/fetch 是否可用由运行时配置决定
+// （见 runFetch 的 enabled 判定），这样管理台开关能立即生效而不必重启。
+//
+// 副作用：向 router 注册路由。
+func (h *Handler) Mount(r chi.Router) {
+	h.mountMCPRoutes(r)
+	h.mountV1Routes(r)
+	h.mountAdminRoutes(r)
+}
+
+// mountMCPRoutes 挂载 MCP 端点（未启用时不做任何事）。
+//
+// 同时挂 /v1/mcp 兼容路径：某些客户端会把 base 拼接成 /v1/mcp，
+// 而配置里的 MCP_PATH 若本来就是 /v1/mcp 则不重复挂载。
+func (h *Handler) mountMCPRoutes(r chi.Router) {
+	if !h.mcpEnabled {
+		return
+	}
+	h.mountMCP(r, h.mcpPath)
+	if h.mcpPath != "/v1/mcp" {
+		h.mountMCP(r, "/v1/mcp")
+	}
+}
+
+// mountV1Routes 挂载对外接口，全部走 requireAPIToken 鉴权中间件。
+//
+// 抓取复用同一套令牌鉴权：令牌状态、RPM 限流与日/月额度（在 FindAPIToken 的
+// SQL WHERE 里按累计用量过滤）随之自动生效。抓取是重操作，这层限流正好必要。
+func (h *Handler) mountV1Routes(r chi.Router) {
 	r.Route("/v1", func(r chi.Router) {
 		r.With(h.auth.requireAPIToken).Post("/search", h.search)
+		r.With(h.auth.requireAPIToken).Get("/fetch", h.fetch)
+		r.With(h.auth.requireAPIToken).Post("/fetch", h.fetch)
 		r.With(h.auth.requireAPIToken).Post("/compat/tavily/search", h.tavilySearch)
 		r.With(h.auth.requireAPIToken).Post("/compat/serper/search", h.serperSearch)
 		r.With(h.auth.requireAPIToken).Post("/compat/openai/responses-search", h.openAISearch)
 		r.With(h.auth.requireAPIToken).Get("/providers", h.providers)
 		r.With(h.auth.requireAPIToken).Get("/usage/summary", h.usageSummary)
 	})
+}
 
+// mountAdminRoutes 挂载管理台接口；除登录外全部要求管理员身份。
+//
+// /fetch/settings 与 /fetch/test 与「系统设置」平级，是抓取功能自有的端点，
+// 不并入 /settings 以免保存搜索设置时连带覆盖抓取配置。
+func (h *Handler) mountAdminRoutes(r chi.Router) {
 	r.Route("/api/admin", func(r chi.Router) {
 		r.Post("/login", h.login)
 		r.Group(func(r chi.Router) {
@@ -135,6 +218,9 @@ func (h *Handler) Mount(r chi.Router) {
 			r.Delete("/tokens/{id}", h.deleteToken)
 			r.Get("/settings", h.getSettings)
 			r.Put("/settings", h.updateSettings)
+			r.Get("/fetch/settings", h.getFetchSettings)
+			r.Put("/fetch/settings", h.updateFetchSettings)
+			r.Post("/fetch/test", h.testFetch)
 			r.Get("/settings/admin-api-key", h.getAdminAPIKey)
 			r.Post("/settings/admin-api-key", h.rotateAdminAPIKey)
 			r.Get("/logs", h.logs)

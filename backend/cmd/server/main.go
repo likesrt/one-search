@@ -84,6 +84,7 @@ func main() {
 	if cfg.MCPEnabled {
 		handler.EnableMCP(cfg.MCPPath)
 	}
+	enableFetch(handler, store, log)
 
 	server := api.NewServer(cfg, log)
 	server.SetHealth(func() bool {
@@ -187,6 +188,22 @@ func buildProviderRegistry(cfg config.Config) (*provider.Registry, error) {
 		return provider.NewKeenableProvider(providerCfg)
 	})
 	return registry, nil
+}
+
+// enableFetch 把数据库里的抓取开关推给 Handler，作为 MCP 侧的启动初值。
+//
+// 设计取舍：Handler 自身不查库决定 MCP 的工具清单（既有测试用零值 Handler 构造，
+// store 为 nil 会 panic），因此启动期由 main 读一次配置并注入标志，运行期则由
+// Handler.fetchSettings 在每次抓取/配置读写时刷新。
+//
+// 读取失败时保持启用：宁可多列出一次工具，也不要因为一次瞬时查询失败就让抓取
+// 在 MCP 侧消失（REST 端点仍会按读到的实时配置拒绝请求）。
+func enableFetch(handler *api.Handler, store *db.Store, log *logging.Logger) {
+	settings, err := store.FetchSettings(context.Background())
+	if err != nil {
+		log.Error("fetch_settings_read_failed", map[string]interface{}{"error": err.Error()})
+	}
+	handler.EnableFetch(err != nil || settings.Enabled)
 }
 
 func startLogRetentionCleaner(store *db.Store, log *logging.Logger) func() {

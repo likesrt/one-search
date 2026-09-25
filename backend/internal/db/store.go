@@ -197,6 +197,63 @@ func (s *Store) UpdateRuntimeSettings(ctx context.Context, settings model.Runtim
 	return err
 }
 
+// FetchSettings 读取「网页抓取」功能配置（settings 表 key='fetch'）。
+//
+// 表里没有该行时返回功能内置默认值（启用、直连、不放行内网、30s 超时），
+// 因此新库无需迁移文件即可用。数值越界在此收敛：timeout_ms 落在 1..60000，
+// 与 api 层的展示约束一致，避免历史脏数据让前端显示一个不可保存的值。
+//
+// 返回值：配置结构与错误；仅查询失败（非「无此行」）时返回错误。
+func (s *Store) FetchSettings(ctx context.Context) (model.FetchSettings, error) {
+	settings := model.FetchSettings{
+		Enabled:   true,
+		TimeoutMS: 30000,
+	}
+	var payload []byte
+	err := s.pool.QueryRow(ctx, `SELECT value FROM settings WHERE key='fetch'`).Scan(&payload)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return settings, nil
+		}
+		return settings, err
+	}
+	if err := json.Unmarshal(payload, &settings); err != nil {
+		return settings, err
+	}
+	settings.ProxyURL = strings.TrimSpace(settings.ProxyURL)
+	if settings.TimeoutMS <= 0 {
+		settings.TimeoutMS = 30000
+	}
+	if settings.TimeoutMS > 60000 {
+		settings.TimeoutMS = 60000
+	}
+	return settings, nil
+}
+
+// UpdateFetchSettings 覆盖保存「网页抓取」功能配置（settings 表 key='fetch'）。
+//
+// 参数 settings 的字段全部按传入值落库，调用方（api 层）负责参数校验；
+// timeout_ms 非正或超过 60000 时在此收敛为默认 30000 / 上界 60000，
+// 使直接调用 store 的路径也不会写出让反代先超时的值。
+//
+// 副作用：写入 settings 表并刷新 updated_at。
+// 返回值：仅写入或序列化失败时返回错误。
+func (s *Store) UpdateFetchSettings(ctx context.Context, settings model.FetchSettings) error {
+	settings.ProxyURL = strings.TrimSpace(settings.ProxyURL)
+	if settings.TimeoutMS <= 0 || settings.TimeoutMS > 60000 {
+		settings.TimeoutMS = 30000
+	}
+	payload, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO settings (key, value, updated_at) VALUES ('fetch', $1::jsonb, now())
+		ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()
+	`, string(payload))
+	return err
+}
+
 func (s *Store) ListProviders(ctx context.Context) ([]model.ProviderConfig, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT p.id, p.name, p.display_name, p.base_url, p.enabled, p.priority, p.weight, p.timeout_ms, p.settings,

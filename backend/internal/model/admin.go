@@ -92,6 +92,23 @@ type ProviderKeyView struct {
 	UpdatedAt                  time.Time  `json:"updated_at"`
 }
 
+// FetchSettings 是「网页抓取」功能的全局配置，独立存于 settings 表的 key='fetch'。
+//
+// 刻意不并入 RuntimeSettings：抓取是独立能力，与搜索路径无关，共用一份配置会让
+// 保存搜索设置时连带覆盖抓取配置，也会让两边的默认值收敛逻辑相互干扰。
+type FetchSettings struct {
+	// Enabled 为 false 时 /v1/fetch 返回 404，且 MCP 工具清单不再列出 fetch
+	Enabled bool `json:"enabled"`
+	// ProxyURL 为空表示直连；写入前会经 provider.NormalizeProxyURL 规范化
+	ProxyURL string `json:"proxy_url"`
+	// AllowPrivate 放行内网与环回目标。作为公网服务必须为 false，
+	// 否则调用方可借本服务探测内网（SSRF）
+	AllowPrivate bool `json:"allow_private"`
+	// TimeoutMS 是单次抓取的总体超时，上界 60000：deploy/nginx.conf 的
+	// proxy_read_timeout 是 65s，配得比它更长只会先被反代断开而对外表现为 504
+	TimeoutMS int `json:"timeout_ms"`
+}
+
 type SearchLog struct {
 	ID           int64           `json:"id"`
 	RequestID    string          `json:"request_id"`
