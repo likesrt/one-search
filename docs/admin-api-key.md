@@ -142,7 +142,7 @@ curl "$BASE_URL/api/admin/dashboard" \
 | `GET` | `/api/admin/dashboard` | 可以 | 获取用量、Provider、Provider 健康度、30 天账单摘要。 |
 | `GET` | `/api/admin/providers` | 可以 | 获取 Provider 配置列表。 |
 | `GET` | `/api/admin/providers/health` | 可以 | 获取 Provider 健康状态。 |
-| `PATCH` | `/api/admin/providers/{name}` | 可以 | 更新 Provider 配置。`name` 为内置 Provider 名，例如 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`。 |
+| `PATCH` | `/api/admin/providers/{name}` | 可以 | 更新 Provider 配置。`name` 为内置 Provider 名，例如 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`。 |
 | `GET` | `/api/admin/keys` | 可以 | 获取 Provider Key 列表，只返回脱敏信息。 |
 | `POST` | `/api/admin/keys` | 可以 | 创建 Provider Key。 |
 | `PATCH` | `/api/admin/keys/{id}` | 可以 | 更新 Provider Key。 |
@@ -341,14 +341,45 @@ curl -X POST "$BASE_URL/api/admin/keys" \
   }'
 ```
 
+完整端点示例（`#` 前缀表示该地址即完整端点，网关不再拼接自己的路径）：
+
+```bash
+curl -X POST "$BASE_URL/api/admin/keys" \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "provider_name": "tavily",
+    "alias": "tavily-relay-full",
+    "key": "tavily-provider-key",
+    "base_url": "#https://relay-c.example.com/proxy/tavily/search"
+  }'
+```
+
+带 Key 级代理的示例（`custom` 用该 Key 自己的代理地址）：
+
+```bash
+curl -X POST "$BASE_URL/api/admin/keys" \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "provider_name": "you",
+    "alias": "you-via-proxy",
+    "key": "you-provider-key",
+    "proxy_mode": "custom",
+    "proxy_url": "http://127.0.0.1:7897"
+  }'
+```
+
 字段说明：
 
 | 字段 | 说明 |
 | --- | --- |
-| `provider_name` | 内置 Provider 名：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`。 |
+| `provider_name` | 内置 Provider 名：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`。 |
 | `alias` | Key 别名。同一 Provider 下唯一。 |
 | `key` | 上游搜索 API Key，会加密存储。 |
-| `base_url` | 可选。该 Key 专属的基础 URL，留空则回退到该渠道（Provider）的 `base_url`。非空时必须是 `http://` 或 `https://` 开头的完整地址，否则返回 400。**覆盖值是整段替换根地址**：Brave 默认地址为 `https://api.search.brave.com/res/v1`，指向中转站时必须写成 `<host>/res/v1`，否则会 404；其余 6 家默认地址不含路径前缀。 |
+| `base_url` | 可选。该 Key 专属的基础 URL，留空则回退到该渠道（Provider）的 `base_url`。非空时必须是 `http://` 或 `https://` 开头的完整地址，否则返回 400。**覆盖值是整段替换根地址**：Brave 默认地址为 `https://api.search.brave.com/res/v1`，指向中转站时必须写成 `<host>/res/v1`，否则会 404；其余 7 家默认地址不含路径前缀。**以 `#` 开头表示该地址即完整端点**，网关不再拼接适配器自己的路径，例如 `#https://relay.example.com/proxy/tavily/search`；`#` 会被剥掉再校验，`#` 后仍需是合法的 http/https 绝对地址。Jina 的搜索词拼在 URL 路径中，保存带 `#` 的地址会返回 400。 |
+| `proxy_mode` | 可选。该 Key 的代理模式，取值 `inherit`（默认，跟随渠道级代理）、`direct`（强制直连，忽略渠道级代理）、`custom`（使用该 Key 自己的 `proxy_url`）。缺省或非法值按 `inherit` 处理。 |
+| `proxy_url` | 可选。仅 `custom` 模式生效的代理地址；地址为空时回退渠道级代理，而不是强制直连。未写协议头会自动补 `http://`，容器内会把 `127.0.0.1`/`localhost` 改写为 `host.docker.internal`。 |
 | `exa_api_key_id` | Exa 官方 usage 查询使用的 API Key ID。Exa 可选但建议填写。 |
 | `exa_service_key` | Exa Team Management `x-api-key`。创建 Exa Key 时当前后端要求必填。 |
 | `weight` | 权重，默认 1，取值范围 1-10000（`<=0` 按 1 处理，`>10000` 截断为 10000）。`weight_priority` 策略下权重即档位：高权重档优先，同档内随机。 |
@@ -356,7 +387,17 @@ curl -X POST "$BASE_URL/api/admin/keys" \
 | `daily_quota` | 单 Key 日请求额度，0 表示不限。 |
 | `monthly_quota` | 单 Key 月请求额度，0 表示不限。 |
 
-说明：搜索请求的生效地址按「Key 级 `base_url` → 渠道 `base_url`」顺序解析，两条路径（含管理台的「测试密钥」）行为一致。**官方额度查询不跟随 Key 级 `base_url`**：`POST /api/admin/keys/{id}/quota` 始终请求各家官方端点（例如 Exa 的 `admin-api.exa.ai`、Jina 的 `r.jina.ai`），把 Key 指向中转站后额度仍来自官方账号。
+说明：搜索请求的生效地址按「Key 级 `base_url` → 渠道 `base_url`」顺序解析，三条路径（搜索、管理台的「测试密钥」、官方额度查询）在 `base_url` 上口径一致。**官方额度查询不跟随 Key 级 `base_url`**：`POST /api/admin/keys/{id}/quota` 始终请求各家官方端点（例如 Exa 的 `admin-api.exa.ai`、Jina 的 `r.jina.ai`），把 Key 指向中转站后额度仍来自官方账号。
+
+Key 级代理（`proxy_mode` / `proxy_url`）与渠道级代理的关系：
+
+| `proxy_mode` | 生效代理地址 |
+| --- | --- |
+| `inherit`（默认，缺省或非法值同此） | 渠道级：渠道设置里 `proxy_enabled=true` 且 `proxy_url` 非空时用它，否则直连。 |
+| `direct` | 强制直连，忽略渠道级代理。 |
+| `custom` | 该 Key 自己的 `proxy_url`；地址为空（含纯空白）时**回退渠道级代理**，而不是直连——避免误配置静默改变出口。 |
+
+搜索、管理台的「测试密钥」与官方额度查询都按上表解析代理，出口一致。渠道级代理在「平台管理 → 编辑渠道 → 高级」里配置，Key 级只覆盖单条 Key。
 
 ### 5.5 更新 Provider Key
 
@@ -371,7 +412,9 @@ curl -X PATCH "$BASE_URL/api/admin/keys/1" \
     "rpm_limit": 120,
     "daily_quota": 5000,
     "monthly_quota": 100000,
-    "base_url": "https://relay-a.example.com"
+    "base_url": "#https://relay-a.example.com/proxy/you/v1/search",
+    "proxy_mode": "custom",
+    "proxy_url": "http://127.0.0.1:7897"
   }'
 ```
 
@@ -380,6 +423,8 @@ curl -X PATCH "$BASE_URL/api/admin/keys/1" \
 - `alias`
 - `key`
 - `base_url`：Key 级基础 URL。传空串 `""` 表示清除覆盖、回退渠道默认地址；字段缺省或 `null` 表示保持原值
+- `proxy_mode`：`inherit`、`direct`、`custom`；字段缺省或 `null` 表示保持原值，非法值等同「不修改」
+- `proxy_url`：Key 级代理地址（仅 `custom` 生效）。传空串 `""` 表示清除、回退渠道级代理；字段缺省或 `null` 表示保持原值
 - `exa_api_key_id`
 - `exa_service_key`
 - `status`：`enabled`、`disabled`、`cooling`、`exhausted`
@@ -438,6 +483,7 @@ curl -X POST "$BASE_URL/api/admin/keys/1/quota" \
 | `firecrawl` | `GET https://api.firecrawl.dev/v2/team/credit-usage` | 返回团队 remainingCredits/planCredits 和账期。 |
 | `serper` | 本地累计用量估算 | Serper 未公开独立余额接口；按默认总额度 2500 credits 减本地累计 credits 估算剩余额度，不额外请求上游。 |
 | `brave` | `GET https://api.search.brave.com/res/v1/web/search` | Brave 通过 `X-RateLimit-*` 响应头返回剩余请求额度；查询本身会消耗一次成功请求。 |
+| `keenable` | 无官方额度接口 | 返回 `supported: false` 与「该渠道暂未配置官方额度查询」，不请求上游，也不参与自动刷新。 |
 
 ### 5.8 创建外部 API Token
 
@@ -489,7 +535,7 @@ curl -X PATCH "$BASE_URL/api/admin/tokens/1" \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "client-a",
-    "allowed_providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave"],
+    "allowed_providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable"],
     "rate_limit_per_min": 120,
     "daily_quota": 2000,
     "monthly_quota": 60000
@@ -524,7 +570,7 @@ curl -X PUT "$BASE_URL/api/admin/settings" \
   -H 'Content-Type: application/json' \
   -d '{
     "default_mode": "parallel",
-    "default_providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave"],
+    "default_providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable"],
     "default_limit": 10,
     "default_dedupe": true,
     "request_timeout_ms": 20000,
@@ -546,7 +592,7 @@ curl -X PUT "$BASE_URL/api/admin/settings" \
 | 字段 | 说明 |
 | --- | --- |
 | `default_mode` | 默认搜索模式：`parallel`、`fallback`、`single`。 |
-| `default_providers` | 默认 Provider 列表；新库初始化和默认 fallback 为 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`。 |
+| `default_providers` | 默认 Provider 列表；新库初始化和默认 fallback 为 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`。 |
 | `default_limit` | 默认返回结果数，搜索时最大限制为 50。 |
 | `default_dedupe` | 是否默认去重。 |
 | `request_timeout_ms` | 单次搜索总超时。 |
@@ -615,7 +661,7 @@ curl -X POST "$BASE_URL/v1/search" \
   -H 'Content-Type: application/json' \
   -d '{
     "query": "latest web search APIs",
-    "providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave"],
+    "providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable"],
     "mode": "parallel",
     "limit": 10,
     "cache": "default",

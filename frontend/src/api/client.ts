@@ -134,6 +134,10 @@ export interface ProviderKey {
   key?: string
   /** key 级基础 URL 覆盖值；缺省或空串表示回退到渠道的 base_url */
   base_url?: string
+  /** key 级代理模式，inherit（跟随渠道）/ direct（强制直连）/ custom（用 key 自己的地址）；缺省视为 inherit */
+  proxy_mode?: string
+  /** custom 模式下的代理地址；为空时回退渠道级代理 */
+  proxy_url?: string
   exa_api_key_id?: string
   exa_service_key_hint?: string
   status: string

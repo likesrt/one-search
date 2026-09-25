@@ -346,8 +346,9 @@ func (o *Orchestrator) searchSingle(ctx context.Context, req model.SearchRequest
 }
 
 // callProvider 调用单个渠道，失败时按配置的重试次数换 key 重试。
-// 每次尝试都基于当前 key 重新构建 adapter：key 级 base_url 覆盖下不同 key 可能指向不同中转站，
-// adapter 因此不能跨 key 复用。返回的 providerExecution 记录实际使用的 key、各次尝试的错误类型与耗时。
+// 每次尝试都基于当前 key 重新构建 adapter：key 级 base_url 与代理三态覆盖下，
+// 同一渠道的不同 key 可能指向不同中转站或不同出口，adapter 因此不能跨 key 复用。
+// 返回的 providerExecution 记录实际使用的 key、各次尝试的错误类型与耗时。
 func (o *Orchestrator) callProvider(ctx context.Context, req model.SearchRequest, providerName string, providerConfigs map[string]model.ProviderConfig, providerLimits map[string]int, keyRetryCounts map[string]int, providerTimeouts map[string]int, providerProxies map[string]string, retryableErrors map[string]map[string]bool) providerExecution {
 	started := time.Now()
 	execution := providerExecution{provider: providerName, status: "error"}
@@ -401,7 +402,10 @@ func (o *Orchestrator) callProvider(ctx context.Context, req model.SearchRequest
 			return execution
 		}
 		// adapter 必须按当前 key 构建：key 可覆盖 base_url，同一渠道的不同 key 可能指向不同中转站。
-		adapter, ok := o.adapterForProvider(providerName, providerConfigs[providerName], key.BaseURL, providerTimeouts[providerName], providerProxies[providerName])
+		// 代理按 key 解析（key 级三态优先、渠道级兜底），与 base_url 同一套覆盖模型；
+		// 结果同时交给额度自动刷新复用，避免额度查询与搜索走不同出口。
+		proxyURL := ResolveProxyURL(key.ProxyMode, key.ProxyURL, providerProxies[providerName])
+		adapter, ok := o.adapterForProvider(providerName, providerConfigs[providerName], key.BaseURL, providerTimeouts[providerName], proxyURL)
 		if !ok {
 			// 注册性已在上方校验过，这里是防御性兜底；key 已经取出，必须释放以免并发计数泄漏。
 			registrationErr := &provider.Error{Type: provider.ErrorTypeUpstream, Message: "provider is not registered"}
@@ -433,7 +437,7 @@ func (o *Orchestrator) callProvider(ctx context.Context, req model.SearchRequest
 		}
 		success := err == nil
 		release(success, err)
-		o.refreshOfficialQuota(key)
+		o.refreshOfficialQuota(key, proxyURL)
 		attemptLatency := time.Since(attemptStarted).Milliseconds()
 		execution.latencyMS = time.Since(started).Milliseconds()
 		execution.key = key
@@ -487,7 +491,11 @@ func shouldRetryWithNextKey(err error, allowed map[string]bool) bool {
 	return allowed[errorType]
 }
 
-func (o *Orchestrator) refreshOfficialQuota(key model.APIKey) {
+// refreshOfficialQuota 在后台异步刷新该 key 的官方额度，带「每 key 限频 + 防重入」保护，
+// 因此可以放心地在每次调用后触发。proxyURL 是已按 key 级三态解析过的生效代理地址
+// （空串表示直连），必须由调用方传入：编排层已持有渠道代理表，无需再查库。
+// key.ID 为 0（未落库的临时 key）、渠道不参与自动刷新、或 Exa 缺管理密钥时直接返回。
+func (o *Orchestrator) refreshOfficialQuota(key model.APIKey, proxyURL string) {
 	if key.ID == 0 || !autoRefreshOfficialQuota(key.ProviderName) {
 		return
 	}
@@ -516,7 +524,7 @@ func (o *Orchestrator) refreshOfficialQuota(key model.APIKey) {
 			o.quotaRefreshes[key.ID] = state
 			o.quotaMu.Unlock()
 		}()
-		quota, err := QueryOfficialQuota(context.Background(), key, model.ProviderKeyQuotaRequest{})
+		quota, err := QueryOfficialQuota(context.Background(), key, model.ProviderKeyQuotaRequest{ProxyURL: proxyURL})
 		if err != nil {
 			quota = model.ProviderKeyQuotaResult{Provider: key.ProviderName, Alias: key.Alias, Supported: true, Status: "error", Message: err.Error(), FetchedAt: time.Now()}
 		}
@@ -524,9 +532,13 @@ func (o *Orchestrator) refreshOfficialQuota(key model.APIKey) {
 	}()
 }
 
+// autoRefreshOfficialQuota 判断某渠道是否参与搜索后的自动额度刷新。
+// 默认 true（多数渠道的官方额度可查且值得刷新），只在明确「查不出额度」时才返回 false：
+// serper 无官方余额接口、brave 的查询要消耗一次真实请求、keenable 无官方额度接口。
+// 漏加渠道会让它每 5 分钟自动查一次并把 unsupported 反复写库（功能无害但属于脏写）。
 func autoRefreshOfficialQuota(providerName string) bool {
 	switch providerName {
-	case model.ProviderSerper, model.ProviderBrave:
+	case model.ProviderSerper, model.ProviderBrave, model.ProviderKeenable:
 		return false
 	default:
 		return true
@@ -750,6 +762,28 @@ func resolveBaseURL(keyBaseURL string, providerBaseURL string) string {
 		return trimmed
 	}
 	return strings.TrimSpace(providerBaseURL)
+}
+
+// ResolveProxyURL 解析生效的代理地址，语义与 resolveBaseURL 同源但多一态「强制直连」：
+//   - inherit（默认，含非法值）：回退渠道级代理，渠道级未开启或地址为空即直连（返回空串）
+//   - direct：强制直连，忽略渠道级代理，恒返回空串
+//   - custom：用 key 自己的地址；地址为空（含纯空白）时回退渠道级而非直连 —— 误配置时静默改变出口
+//     比沿用渠道级更危险，因此这里不做「空即直连」的推断
+//
+// 返回值直接作为 provider.Config.ProxyURL 使用，空串表示不使用代理。
+func ResolveProxyURL(keyProxyMode string, keyProxyURL string, providerProxyURL string) string {
+	switch strings.TrimSpace(keyProxyMode) {
+	case model.ProxyModeDirect:
+		return ""
+	case model.ProxyModeCustom:
+		if trimmed := strings.TrimSpace(keyProxyURL); trimmed != "" {
+			return trimmed
+		}
+		// custom 但地址为空：按「回退渠道级」处理，与 inherit 的兜底一致。
+		return strings.TrimSpace(providerProxyURL)
+	default:
+		return strings.TrimSpace(providerProxyURL)
+	}
 }
 
 // adapterForProvider 按渠道名构建适配器。
@@ -1179,8 +1213,8 @@ func firstError(executions []providerExecution) string {
 }
 
 // TestProviderKey 用指定密钥发起一次真实搜索，供管理台「测试密钥」使用。
-// 它绕过 keyPool 直接持有完整 APIKey，因此必须同样传入 key.BaseURL，
-// 否则测试打的是渠道默认地址，与生产行为不一致；调用结果会写回 key 的成功/失败统计。
+// 它绕过 keyPool 直接持有完整 APIKey，因此必须同样传入 key.BaseURL 与解析后的代理，
+// 否则测试打的是渠道默认地址或绕过代理，与生产行为不一致；调用结果会写回 key 的成功/失败统计。
 // query 为空时使用内置示例词，limit<=0 时取 3；失败时同时返回 summary 与 error。
 func (o *Orchestrator) TestProviderKey(ctx context.Context, keyID int64, query string, limit int) (model.ProviderCallSummary, []model.SearchResult, error) {
 	if query == "" {
@@ -1198,7 +1232,9 @@ func (o *Orchestrator) TestProviderKey(ctx context.Context, keyID int64, query s
 		return model.ProviderCallSummary{}, nil, err
 	}
 	providerConfigByName := providerConfigMap(providerConfigs)
-	adapter, ok := o.adapterForProvider(key.ProviderName, providerConfigByName[key.ProviderName], key.BaseURL, 0, "")
+	// 「测试密钥」此前硬编码传空代理，导致明明配了代理却直连；这里与搜索路径同样按 key 级三态解析。
+	proxyURL := ResolveProxyURL(key.ProxyMode, key.ProxyURL, providerProxies(providerSettingsFromProviders(providerConfigs))[key.ProviderName])
+	adapter, ok := o.adapterForProvider(key.ProviderName, providerConfigByName[key.ProviderName], key.BaseURL, 0, proxyURL)
 	if !ok {
 		err := &provider.Error{Type: provider.ErrorTypeUpstream, Message: "provider is not registered"}
 		return model.ProviderCallSummary{Provider: key.ProviderName, KeyAlias: key.Alias, Status: "error", ErrorType: provider.ErrorType(err), Error: err.Error()}, nil, err

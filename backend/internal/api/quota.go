@@ -13,6 +13,11 @@ import (
 	"github.com/one-search/one-search/backend/internal/search"
 )
 
+// keyQuota 手动查询单个密钥的官方额度（POST /api/admin/keys/{id}/quota）。
+// 代理按 key 级三态解析（custom 用 key 自己的地址、direct 强制直连、inherit 回退渠道级），
+// 与搜索路径口径一致；请求体里的 proxy_url 恒被忽略（ProviderKeyQuotaRequest 该字段 json:"-"），
+// 防止客户端注入任意代理绕过管理台配置。
+// 查询失败不返回 4xx/5xx：HTTP 200，错误放在响应体的 status/message 里并写回库。
 func (h *Handler) keyQuota(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -26,9 +31,7 @@ func (h *Handler) keyQuota(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if proxyURL := h.providerProxyURL(r.Context(), key.ProviderName); proxyURL != "" {
-		req.ProxyURL = proxyURL
-	}
+	req.ProxyURL = search.ResolveProxyURL(key.ProxyMode, key.ProxyURL, h.providerProxyURL(r.Context(), key.ProviderName))
 	start := time.Now()
 	h.logInfo("provider_key_quota_start", map[string]interface{}{"provider": key.ProviderName, "key_id": id, "alias": key.Alias, "proxy_enabled": req.ProxyURL != "", "request_id": RequestID(r.Context())})
 	response, err := search.QueryOfficialQuota(r.Context(), key, req)

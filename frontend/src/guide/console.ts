@@ -215,7 +215,7 @@ export const consoleChapter: DocChapter = {
           type: 'list',
           items: [
             '「可重试错误」多选：`auth` 鉴权失败、`quota_exhausted` 额度耗尽、`rate_limited` 限流、`timeout` 超时、`upstream` 上游错误、`invalid_response` 响应异常。默认勾选前五项。清空该项则回到系统默认集合。',
-            '「使用代理」开关与「代理地址」（例如 `http://127.0.0.1:7897`）。该代理同时用于搜索请求与官方额度查询；容器内访问宿主机代理时地址会被自动改写为 `host.docker.internal`。'
+            '「使用代理」开关与「代理地址」（例如 `http://127.0.0.1:7897`）。这是**渠道级**代理，该渠道下所有密钥共用；单条密钥可在「编辑密钥」弹窗里用「代理模式」覆盖它（跟随渠道 / 强制直连 / 使用独立代理）。该代理同时用于搜索请求、管理台「测试密钥」与官方额度查询；容器内访问宿主机代理时地址会被自动改写为 `host.docker.internal`。'
           ]
         },
         { type: 'heading', text: '「编辑密钥」弹窗', level: 4 },
@@ -224,7 +224,9 @@ export const consoleChapter: DocChapter = {
           columns: ['字段', 'API 字段', '说明'],
           rows: [
             ['别名', '`alias`', '必填；同一渠道内未删除的密钥中唯一'],
-            ['基础 URL（选填）', '`base_url`', '留空回退渠道默认地址；填了就覆盖，**传空串即清除覆盖**'],
+            ['基础 URL（选填）', '`base_url`', '留空回退渠道默认地址；填了就覆盖，**传空串即清除覆盖**。以 `#` 开头表示该地址即完整端点，网关不再拼接自己的路径（Jina 不支持）'],
+            ['代理模式', '`proxy_mode`', '`inherit` 跟随渠道级代理（默认）、`direct` 强制直连、`custom` 用该密钥自己的地址'],
+            ['代理地址（仅「使用独立代理」）', '`proxy_url`', '`custom` 模式下生效；地址留空时**回退渠道级代理**而不是直连。切回其它模式时该地址会被清空'],
             ['权重（1-10000，越大越优先）', '`weight`', '超出范围会被夹紧'],
             ['Exa 管理密钥（选填，仅 exa）', '`exa_service_key`', '用于查询 Exa 官方额度；留空表示不修改现状'],
             ['每分钟限制（0 表示不限）', '`rpm_limit`', '该密钥自身的分钟级并发上限'],
@@ -369,7 +371,7 @@ export const consoleChapter: DocChapter = {
           rows: [
             ['默认模式', '`default_mode`', '并发聚合（`parallel`）'],
             ['汇总返回结果数', '`default_limit`', '10（最小 1）'],
-            ['默认平台', '`default_providers`', '全部七家'],
+            ['默认平台', '`default_providers`', '全部八家'],
             ['结果去重', '`default_dedupe`', '开'],
             ['平台路由策略', '`provider_routing_strategy`', '固定顺序（`fixed`）']
           ]

@@ -164,7 +164,7 @@ export const mcpChapter: DocChapter = {
           columns: ['入参', '类型', '约束'],
           rows: [
             ['`query`', 'string', '**必填**，裁剪空白后不能为空，否则 `-32602` `query is required`'],
-            ['`providers`', 'array', '枚举七家渠道'],
+            ['`providers`', 'array', '枚举八家渠道'],
             ['`mode`', 'string', '枚举 `parallel` / `fallback` / `single`'],
             ['`limit`', 'integer', 'schema 声明 `minimum: 1`、`maximum: 50`（这是 schema 层声明，服务端编排仍按自己的规则处理）'],
             ['`freshness`', 'string', '自由文本'],

@@ -42,6 +42,18 @@ type APIToken struct {
 	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
+// Key 级代理模式三态。用三态而非布尔开关：布尔无法区分「未配置」与「显式直连」，
+// 会让新建 key 默认绕过渠道级代理。
+const (
+	// ProxyModeInherit 回退渠道级代理；渠道级未开启或地址为空时直连。
+	ProxyModeInherit = "inherit"
+	// ProxyModeDirect 强制直连，忽略渠道级代理。
+	ProxyModeDirect = "direct"
+	// ProxyModeCustom 使用该 key 自己的 proxy_url；地址为空时回退渠道级（不当直连，
+	// 避免误配置静默改变出口）。
+	ProxyModeCustom = "custom"
+)
+
 type ProviderKeyView struct {
 	ID                         int64      `json:"id"`
 	ProviderID                 int64      `json:"provider_id"`
@@ -49,6 +61,8 @@ type ProviderKeyView struct {
 	Alias                      string     `json:"alias"`
 	KeyHint                    string     `json:"key_hint"`
 	BaseURL                    string     `json:"base_url"`
+	ProxyMode                  string     `json:"proxy_mode"`
+	ProxyURL                   string     `json:"proxy_url"`
 	Key                        string     `json:"key,omitempty"`
 	ExaAPIKeyID                string     `json:"exa_api_key_id,omitempty"`
 	ExaServiceKeyHint          string     `json:"exa_service_key_hint,omitempty"`
@@ -141,6 +155,8 @@ type ProviderKeyUpdate struct {
 	Alias          *string `json:"alias,omitempty"`
 	Key            *string `json:"key,omitempty"`
 	BaseURL        *string `json:"base_url,omitempty"`
+	ProxyMode      *string `json:"proxy_mode,omitempty"`
+	ProxyURL       *string `json:"proxy_url,omitempty"`
 	ExaAPIKeyID    *string `json:"exa_api_key_id,omitempty"`
 	ExaServiceKey  *string `json:"exa_service_key,omitempty"`
 	Status         *string `json:"status,omitempty"`

@@ -50,7 +50,7 @@ export const quickstartChapter: DocChapter = {
           items: [
             {
               title: '进入「平台管理」',
-              text: '七家渠道（Exa / You.com / Jina / Tavily / Firecrawl / Serper / Brave Search）以卡片形式列出。卡片右上角的开关控制渠道是否参与搜索，关掉的渠道即使被请求指定也会被跳过。'
+              text: '八家渠道（Exa / You.com / Jina / Tavily / Firecrawl / Serper / Brave Search / Keenable）以卡片形式列出。卡片右上角的开关控制渠道是否参与搜索，关掉的渠道即使被请求指定也会被跳过。'
             },
             {
               title: '点击卡片进入配置弹窗',

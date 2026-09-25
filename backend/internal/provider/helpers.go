@@ -28,8 +28,15 @@ type HTTPProvider struct {
 	baseURL   string
 	userAgent string
 	client    *http.Client
+	// exactEndpoint 为 true 表示 baseURL 已是完整端点（配置里带 `#` 前缀），适配器不再拼接自己的路径。
+	exactEndpoint bool
 }
 
+// NewHTTPProvider 构建通用 HTTP 适配器，是所有适配器 base_url 的唯一规范化点。
+// cfg.BaseURL 以 `#` 开头表示「该地址即完整端点，适配器不再拼接自己的路径」。`#` 在 URL 里是
+// fragment 分隔符，必须在解析前剥掉，否则 url.Parse("#https://x/y") 会得到空 Host 与填满的 Fragment。
+// exact 模式不做 TrimRight("/")：用户已声明完整端点，原样保留最忠实。
+// cfg.ProxyURL 为空或纯空白时直连（transport.Proxy 显式置 nil，不读代理环境变量）。
 func NewHTTPProvider(cfg Config) *HTTPProvider {
 	timeout := cfg.Timeout
 	if timeout == 0 {
@@ -42,11 +49,19 @@ func NewHTTPProvider(cfg Config) *HTTPProvider {
 			transport.Proxy = http.ProxyURL(parsed)
 		}
 	}
+	baseURL := strings.TrimSpace(cfg.BaseURL)
+	exactEndpoint := strings.HasPrefix(baseURL, "#")
+	if exactEndpoint {
+		baseURL = strings.TrimSpace(strings.TrimPrefix(baseURL, "#"))
+	} else {
+		baseURL = strings.TrimRight(baseURL, "/")
+	}
 	return &HTTPProvider{
-		name:      cfg.Name,
-		baseURL:   strings.TrimRight(cfg.BaseURL, "/"),
-		userAgent: cfg.UserAgent,
-		client:    &http.Client{Timeout: timeout, Transport: transport},
+		name:          cfg.Name,
+		baseURL:       baseURL,
+		userAgent:     cfg.UserAgent,
+		client:        &http.Client{Timeout: timeout, Transport: transport},
+		exactEndpoint: exactEndpoint,
 	}
 }
 
@@ -83,6 +98,16 @@ func (p *HTTPProvider) HealthCheck(ctx context.Context, key model.APIKey) error 
 	return nil
 }
 
+// requestURL 拼出最终请求地址。exact 端点（base_url 带 `#` 前缀）下忽略适配器自带的路径，
+// 因为用户给出的地址本身就是完整端点；其余情况沿用 base_url + endpoint 的既有语义。
+func (p *HTTPProvider) requestURL(endpoint string) string {
+	if p.exactEndpoint {
+		return p.baseURL
+	}
+	return p.baseURL + endpoint
+}
+
+// newJSONRequest 组装 JSON 请求体请求（POST/PUT）。exact 端点下 endpoint 被忽略，见 requestURL。
 func (p *HTTPProvider) newJSONRequest(ctx context.Context, method, endpoint string, body interface{}) (*http.Request, error) {
 	var reader io.Reader
 	if body != nil {
@@ -92,7 +117,7 @@ func (p *HTTPProvider) newJSONRequest(ctx context.Context, method, endpoint stri
 		}
 		reader = bytes.NewReader(payload)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, p.baseURL+endpoint, reader)
+	request, err := http.NewRequestWithContext(ctx, method, p.requestURL(endpoint), reader)
 	if err != nil {
 		return nil, err
 	}
@@ -104,10 +129,16 @@ func (p *HTTPProvider) newJSONRequest(ctx context.Context, method, endpoint stri
 	return request, nil
 }
 
+// newGETRequest 组装 GET 请求并在 params 非空时追加查询串。
+// exact 端点自带 query 时必须用 `&` 连接，否则会拼出两个 `?` 的非法 URL。
 func (p *HTTPProvider) newGETRequest(ctx context.Context, endpoint string, params url.Values) (*http.Request, error) {
-	requestURL := p.baseURL + endpoint
+	requestURL := p.requestURL(endpoint)
 	if len(params) > 0 {
-		requestURL += "?" + params.Encode()
+		separator := "?"
+		if strings.Contains(requestURL, "?") {
+			separator = "&"
+		}
+		requestURL += separator + params.Encode()
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {

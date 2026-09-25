@@ -25,7 +25,7 @@ type AppStore interface {
 	UpdateProvider(ctx context.Context, provider model.ProviderConfig) error
 	ListProviderKeys(ctx context.Context) ([]model.ProviderKeyView, error)
 	GetAPIKeyByID(ctx context.Context, id int64) (model.APIKey, error)
-	CreateProviderKey(ctx context.Context, providerName, alias, plainKey, exaAPIKeyID, exaServiceKey, baseURL string, weight, rpmLimit, dailyQuota, monthlyQuota, maxConcurrency int) (model.ProviderKeyView, error)
+	CreateProviderKey(ctx context.Context, providerName, alias, plainKey, exaAPIKeyID, exaServiceKey, baseURL, proxyMode, proxyURL string, weight, rpmLimit, dailyQuota, monthlyQuota, maxConcurrency int) (model.ProviderKeyView, error)
 	UpdateProviderKeyOfficialQuota(ctx context.Context, id int64, quota model.ProviderKeyQuotaResult) error
 	UpdateProviderKeyStatus(ctx context.Context, id int64, status string) error
 	UpdateProviderKey(ctx context.Context, id int64, patch model.ProviderKeyUpdate) (model.ProviderKeyView, error)
@@ -556,23 +556,35 @@ func (h *Handler) revealKey(w http.ResponseWriter, r *http.Request) {
 // validateProviderKeyBaseURL 校验 key 级基础 URL。
 // 空值（含纯空白）放行，语义为「回退渠道默认地址」；非空时必须是能被 url.Parse 解析
 // 且带 http/https scheme 与 host 的绝对地址。放在 handler 而非 store 是因为参数校验属于 API 边界职责。
+// providerName 用于识别不支持完整端点语法的渠道；调用方拿不到渠道名时可传空串（跳过渠道级判断）。
+// `#` 前缀表示「该 URL 即完整端点，适配器不再拼接自己的路径」，校验前必须剥掉：
+// `#` 在 URL 里是 fragment 分隔符，直接 url.Parse("#https://x/y") 会得到空 Host 与填满的 Fragment。
 // 返回的 error 信息可直接作为 400 响应体。
-func validateProviderKeyBaseURL(raw string) error {
+func validateProviderKeyBaseURL(raw string, providerName string) error {
 	value := strings.TrimSpace(raw)
 	if value == "" {
 		return nil
+	}
+	if strings.HasPrefix(value, "#") {
+		// Jina 的搜索词拼在 URL 路径里（endpoint 由查询词拼成），exact 模式会丢弃 endpoint，
+		// 查询词随之丢失，因此这里直接拒绝而不是放行到运行期才失败。
+		if providerName == model.ProviderJina {
+			return errors.New("Jina 的搜索词拼在 URL 路径中，不支持 `#` 完整端点语法，请去掉 `#` 前缀")
+		}
+		value = strings.TrimSpace(strings.TrimPrefix(value, "#"))
 	}
 	// 畸形地址若放过，会在 http.NewRequest 阶段失败并被归类为 upstream 错误，
 	// 表现为「上游挂了」而不是「配错了」，因此必须在保存时拦截。
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return errors.New("base_url 必须是以 http:// 或 https:// 开头的完整地址")
+		return errors.New("base_url 必须是以 http:// 或 https:// 开头的完整地址（可用 `#` 前缀声明该地址即完整端点）")
 	}
 	return nil
 }
 
 // createKey 新建渠道密钥。/api/admin/keys
-// 必填 provider_name、key；base_url 选填，留空表示沿用渠道默认地址。
+// 必填 provider_name、key；base_url 选填，留空表示沿用渠道默认地址；
+// proxy_mode 取 inherit/direct/custom（缺省或非法值由 store 收敛为 inherit），proxy_url 仅 custom 有意义。
 // 参数校验不通过返回 400，底层写入失败返回 500，成功返回 201 与完整密钥视图。
 func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -582,6 +594,8 @@ func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
 		ExaAPIKeyID    string `json:"exa_api_key_id"`
 		ExaServiceKey  string `json:"exa_service_key"`
 		BaseURL        string `json:"base_url"`
+		ProxyMode      string `json:"proxy_mode"`
+		ProxyURL       string `json:"proxy_url"`
 		Weight         int    `json:"weight"`
 		RPMLimit       int    `json:"rpm_limit"`
 		DailyQuota     int    `json:"daily_quota"`
@@ -592,11 +606,11 @@ func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
-	if err := validateProviderKeyBaseURL(req.BaseURL); err != nil {
+	if err := validateProviderKeyBaseURL(req.BaseURL, req.ProviderName); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	key, err := h.store.CreateProviderKey(r.Context(), req.ProviderName, req.Alias, req.Key, req.ExaAPIKeyID, req.ExaServiceKey, req.BaseURL, req.Weight, req.RPMLimit, req.DailyQuota, req.MonthlyQuota, req.MaxConcurrency)
+	key, err := h.store.CreateProviderKey(r.Context(), req.ProviderName, req.Alias, req.Key, req.ExaAPIKeyID, req.ExaServiceKey, req.BaseURL, req.ProxyMode, req.ProxyURL, req.Weight, req.RPMLimit, req.DailyQuota, req.MonthlyQuota, req.MaxConcurrency)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -607,7 +621,9 @@ func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
 
 // updateKey 局部更新渠道密钥（PATCH /api/admin/keys/{id}）。
 // 请求体为 model.ProviderKeyUpdate，字段缺省 / null 表示保持原值；
-// base_url 传空串表示清除覆盖、回退渠道默认地址。base_url 非空时做与创建相同的格式校验。
+// base_url 传空串表示清除覆盖、回退渠道默认地址；proxy_url 传空串表示清除该 key 的代理地址；
+// proxy_mode 只接受 inherit/direct/custom，非法值等同「不修改」（由 store 侧过滤）。
+// base_url 非空时做与创建相同的格式校验。
 func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -620,7 +636,17 @@ func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.BaseURL != nil {
-		if err := validateProviderKeyBaseURL(*req.BaseURL); err != nil {
+		providerName := ""
+		// 只有 `#` 语法需要渠道名做渠道级判断，其余情况不必为此多查一次库。
+		if strings.HasPrefix(strings.TrimSpace(*req.BaseURL), "#") {
+			existing, err := h.store.GetAPIKeyByID(r.Context(), id)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			providerName = existing.ProviderName
+		}
+		if err := validateProviderKeyBaseURL(*req.BaseURL, providerName); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}

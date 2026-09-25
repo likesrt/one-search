@@ -123,6 +123,11 @@ func main() {
 	}
 }
 
+// buildProviderRegistry 注册全部内置渠道的适配器工厂。
+// 工厂而非实例：key 级 base_url / 代理差异要求每次请求按当前 key 重建适配器。
+// cfg.UpstreamUserAgent 与 cfg.RequestTimeout 作为兜底注入到每个渠道配置里。
+// 未在此注册的渠道名会让 providerRegistered 为 false，搜索直接返回 "provider is not registered"，
+// 因此渠道清单（model.DefaultProviders）、迁移脚本与本函数必须同步增删。
 func buildProviderRegistry(cfg config.Config) (*provider.Registry, error) {
 	registry := provider.NewRegistry()
 	registry.RegisterFactory(model.ProviderExa, func(providerCfg provider.Config) provider.Provider {
@@ -173,6 +178,13 @@ func buildProviderRegistry(cfg config.Config) (*provider.Registry, error) {
 			providerCfg.Timeout = cfg.RequestTimeout
 		}
 		return provider.NewBraveProvider(providerCfg)
+	})
+	registry.RegisterFactory(model.ProviderKeenable, func(providerCfg provider.Config) provider.Provider {
+		providerCfg.UserAgent = cfg.UpstreamUserAgent
+		if providerCfg.Timeout == 0 {
+			providerCfg.Timeout = cfg.RequestTimeout
+		}
+		return provider.NewKeenableProvider(providerCfg)
 	})
 	return registry, nil
 }

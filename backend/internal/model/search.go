@@ -10,9 +10,13 @@ const (
 	ProviderFirecrawl = "firecrawl"
 	ProviderSerper    = "serper"
 	ProviderBrave     = "brave"
+	ProviderKeenable  = "keenable"
 )
 
-var DefaultProviders = []string{ProviderExa, ProviderYou, ProviderJina, ProviderTavily, ProviderFirecrawl, ProviderSerper, ProviderBrave}
+// DefaultProviders 是内置渠道的默认顺序。
+// 顺序对外可见（MCP 的 enum 与文档都按此顺序列举），新增渠道只能追加到末尾，
+// 否则会改变既有默认路由的优先级语义。
+var DefaultProviders = []string{ProviderExa, ProviderYou, ProviderJina, ProviderTavily, ProviderFirecrawl, ProviderSerper, ProviderBrave, ProviderKeenable}
 
 type SearchMode string
 
@@ -115,6 +119,9 @@ type ProviderConfig struct {
 	AvailableKeys int                    `json:"available_keys,omitempty"`
 }
 
+// APIKey 是从密钥池取出、供适配器直接使用的一条渠道密钥。
+// ProxyMode / ProxyURL 是该 key 自己的代理配置：ProxyMode 取 inherit/direct/custom，
+// 由编排层经 search.ResolveProxyURL 与渠道级代理合成最终生效地址。
 type APIKey struct {
 	ID                int64     `json:"id"`
 	ProviderID        int64     `json:"provider_id"`
@@ -134,6 +141,8 @@ type APIKey struct {
 	MonthlyCredits    float64   `json:"monthly_credits,omitempty"`
 	MaxConcurrency    int       `json:"max_concurrency"`
 	BaseURL           string    `json:"base_url,omitempty"`
+	ProxyMode         string    `json:"proxy_mode,omitempty"`
+	ProxyURL          string    `json:"proxy_url,omitempty"`
 	TotalSuccesses    int64     `json:"total_successes"`
 	TotalFailures     int64     `json:"total_failures"`
 	LastUsedAt        time.Time `json:"last_used_at,omitempty"`

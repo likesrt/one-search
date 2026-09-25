@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -77,9 +78,19 @@ type orchestratorTestKeyPool struct {
 	mu       sync.Mutex
 	acquired []string
 	excluded [][]int64
+	// ids 按 Acquire 顺序指定返回的 key ID，缺省为 0，语义是「未落库的临时 key」。
+	// 默认取 0 是刻意的：callProvider 只对 ID>0 的 key 触发后台官方额度刷新，
+	// 那个 goroutine 会真的发起 HTTP 请求，可能打到别的用例刚换过的全局额度端点地址，
+	// 造成测试互相干扰（历史上表现为 TestQueryTavilyQuota 偶发 Authorization 不匹配）。
+	// 需要断言 triedIDs 的用例请显式给出正数 ID。
+	ids []int64
 	// baseURLs 按 Acquire 顺序提供 key 级基础 URL 覆盖值，用于模拟不同 key 指向不同中转站；
 	// 元素不足时 key.BaseURL 为空，即回退渠道默认地址。
 	baseURLs []string
+	// proxyModes / proxyURLs 同样按 Acquire 顺序提供 key 级代理三态配置，
+	// 元素不足时为空：空模式按 inherit 处理、空地址表示 custom 无自有地址。
+	proxyModes []string
+	proxyURLs  []string
 }
 
 func (p *orchestratorTestKeyPool) Acquire(ctx context.Context, providerName string, excludeIDs ...int64) (model.APIKey, func(bool, error), error) {
@@ -88,12 +99,23 @@ func (p *orchestratorTestKeyPool) Acquire(ctx context.Context, providerName stri
 	p.acquired = append(p.acquired, providerName)
 	p.excluded = append(p.excluded, append([]int64(nil), excludeIDs...))
 	index := len(p.acquired) - 1
-	id := int64(len(p.acquired))
+	id := int64(0)
+	if index < len(p.ids) {
+		id = p.ids[index]
+	}
 	baseURL := ""
 	if index < len(p.baseURLs) {
 		baseURL = p.baseURLs[index]
 	}
-	return model.APIKey{ID: id, ProviderName: providerName, Alias: providerName + "-key", Value: "test-key", BaseURL: baseURL}, func(bool, error) {}, nil
+	proxyMode := ""
+	if index < len(p.proxyModes) {
+		proxyMode = p.proxyModes[index]
+	}
+	proxyURL := ""
+	if index < len(p.proxyURLs) {
+		proxyURL = p.proxyURLs[index]
+	}
+	return model.APIKey{ID: id, ProviderName: providerName, Alias: providerName + "-key", Value: "test-key", BaseURL: baseURL, ProxyMode: proxyMode, ProxyURL: proxyURL}, func(bool, error) {}, nil
 }
 
 type orchestratorTestProvider struct {
@@ -518,7 +540,8 @@ func (p *flakyTestProvider) Search(ctx context.Context, req model.SearchRequest,
 func (p *flakyTestProvider) HealthCheck(ctx context.Context, key model.APIKey) error { return nil }
 
 func TestSearchRetryPassesTriedKeyIDsToKeyPool(t *testing.T) {
-	keyPool := &orchestratorTestKeyPool{}
+	// 这里需要正数 key ID：triedIDs 只在 key.ID>0 时记录，才能断言第二次取 key 时被排除。
+	keyPool := &orchestratorTestKeyPool{ids: []int64{1, 2}}
 	registry := provider.NewRegistry(&flakyTestProvider{name: model.ProviderJina})
 	store := &orchestratorTestStore{
 		settings: model.RuntimeSettings{
@@ -618,6 +641,36 @@ func TestResolveBaseURL(t *testing.T) {
 	}
 }
 
+// ResolveProxyURL 的三态语义：inherit（含空 / 非法值）回退渠道级、direct 强制直连、
+// custom 用 key 自己的地址且地址为空时回退渠道级（而不是直连），所有输入都做 TrimSpace。
+func TestResolveProxyURL(t *testing.T) {
+	cases := []struct {
+		name             string
+		keyProxyMode     string
+		keyProxyURL      string
+		providerProxyURL string
+		want             string
+	}{
+		{name: "inherit 回退渠道代理", keyProxyMode: "inherit", providerProxyURL: "http://channel:8080", want: "http://channel:8080"},
+		{name: "inherit 且渠道未配置即直连", keyProxyMode: "inherit", providerProxyURL: "", want: ""},
+		{name: "模式为空串按 inherit 处理", keyProxyMode: "", providerProxyURL: "http://channel:8080", want: "http://channel:8080"},
+		{name: "非法模式按 inherit 处理", keyProxyMode: "bogus", providerProxyURL: "http://channel:8080", want: "http://channel:8080"},
+		{name: "direct 忽略渠道代理与 key 地址", keyProxyMode: "direct", keyProxyURL: "http://key:9090", providerProxyURL: "http://channel:8080", want: ""},
+		{name: "direct 且渠道未配置仍为直连", keyProxyMode: "direct", providerProxyURL: "", want: ""},
+		{name: "custom 用 key 自己的地址", keyProxyMode: "custom", keyProxyURL: "http://key:9090", providerProxyURL: "http://channel:8080", want: "http://key:9090"},
+		{name: "custom 地址为空回退渠道代理而非直连", keyProxyMode: "custom", keyProxyURL: "", providerProxyURL: "http://channel:8080", want: "http://channel:8080"},
+		{name: "custom 地址为纯空白回退渠道代理", keyProxyMode: "custom", keyProxyURL: "   ", providerProxyURL: "http://channel:8080", want: "http://channel:8080"},
+		{name: "custom 且两侧都没有地址时为空", keyProxyMode: "custom", keyProxyURL: "", providerProxyURL: "", want: ""},
+		{name: "两侧带空白时裁剪", keyProxyMode: " custom ", keyProxyURL: "  http://key:9090  ", providerProxyURL: "  http://channel:8080  ", want: "http://key:9090"},
+		{name: "direct 带空白也能识别", keyProxyMode: " direct ", providerProxyURL: "http://channel:8080", want: ""},
+	}
+	for _, tc := range cases {
+		if got := ResolveProxyURL(tc.keyProxyMode, tc.keyProxyURL, tc.providerProxyURL); got != tc.want {
+			t.Fatalf("%s: ResolveProxyURL(%q, %q, %q) = %q, want %q", tc.name, tc.keyProxyMode, tc.keyProxyURL, tc.providerProxyURL, got, tc.want)
+		}
+	}
+}
+
 // newTavilyStubServer 起一个只接受 POST /search 的 stub 服务，返回给定标题的 Tavily 格式结果。
 // status >= 400 时返回 {"error":"boom"}（不含 quota/credit 字样，保证被归类为可重试的 upstream）。
 // hits 用于断言请求实际打到了哪个地址。
@@ -648,10 +701,21 @@ func newTavilyStubServer(t *testing.T, title string, status int, hits *int32) *h
 // 使 base_url 解析结果真正作用到 HTTP 请求地址上（而非被假 provider 吞掉）。
 // providerBaseURL 是渠道默认地址，retryCount 是渠道的 key_retry_count。
 func newKeyBaseURLTestOrchestrator(keyPool KeyPool, providerBaseURL string, retryCount int) *Orchestrator {
+	return newTavilyTestOrchestrator(keyPool, providerBaseURL, "", retryCount)
+}
+
+// newTavilyTestOrchestrator 同 newKeyBaseURLTestOrchestrator，但可额外开启渠道级代理
+// （channelProxyURL 非空时写入 proxy_enabled/proxy_url），用于验证 key 级代理三态是否真的改变了出口。
+func newTavilyTestOrchestrator(keyPool KeyPool, providerBaseURL, channelProxyURL string, retryCount int) *Orchestrator {
 	registry := provider.NewRegistry()
 	registry.RegisterFactory(model.ProviderTavily, func(cfg provider.Config) provider.Provider {
 		return provider.NewTavilyProvider(cfg)
 	})
+	settings := map[string]interface{}{"key_retry_count": retryCount}
+	if channelProxyURL != "" {
+		settings["proxy_enabled"] = true
+		settings["proxy_url"] = channelProxyURL
+	}
 	store := &orchestratorTestStore{
 		settings: model.RuntimeSettings{
 			DefaultMode: model.SearchModeSingle, DefaultProviders: []string{model.ProviderTavily},
@@ -661,7 +725,7 @@ func newKeyBaseURLTestOrchestrator(keyPool KeyPool, providerBaseURL string, retr
 			{
 				Name: model.ProviderTavily, Enabled: true, Priority: 1, Weight: 1, TimeoutMS: 1000,
 				BaseURL:  providerBaseURL,
-				Settings: map[string]interface{}{"key_retry_count": retryCount},
+				Settings: settings,
 			},
 		},
 	}
@@ -716,6 +780,116 @@ func TestSearchFallsBackToProviderBaseURL(t *testing.T) {
 	if got := atomic.LoadInt32(&providerHits); got != 1 {
 		t.Fatalf("provider default base_url hits = %d, want 1", got)
 	}
+}
+
+// newProxyStubServer 起一个记录命中次数的 HTTP 代理 stub。
+// 走代理的请求以绝对形式（`POST http://host/path`）到达，这里不转发，直接按 Tavily 格式返回结果，
+// 因此「命中代理 stub」本身就证明请求确实经过了代理。
+func newProxyStubServer(t *testing.T, title string, hits *int32) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"results": []map[string]interface{}{
+				{"title": title, "url": "https://example.com/" + title, "content": "proxied"},
+			},
+		})
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// requireHostLoopbackProxy 在容器内跳过依赖 loopback 代理地址的用例：
+// provider.NormalizeProxyURL 检测到 /.dockerenv 时会把 `//127.0.0.1:` 与 `//localhost:` 改写成
+// `host.docker.internal`，本测试用的 httptest 代理地址会因此不可达 —— 这是环境差异而非被测逻辑的问题。
+func requireHostLoopbackProxy(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		t.Skip("容器内 loopback 代理地址会被改写为 host.docker.internal，跳过出口验证")
+	}
+}
+
+// key 级代理三态必须真正作用到出口上（而不是只体现在配置里）。
+// 渠道默认地址设为不可达的 127.0.0.1:1：只有真的经过代理 stub 才能拿到结果，
+// 反过来「不该走代理」的用例则要求代理 stub 命中数为 0。
+func TestSearchResolvesKeyProxyMode(t *testing.T) {
+	cases := []struct {
+		name         string
+		proxyModes   []string
+		proxyURLs    []string
+		baseURLs     []string
+		wantTitle    string
+		wantChannel  int32
+		wantKeyProxy int32
+	}{
+		{
+			name: "inherit 走渠道代理", proxyModes: []string{model.ProxyModeInherit},
+			wantTitle: "via-channel-proxy", wantChannel: 1,
+		},
+		{
+			name: "模式为空按 inherit 走渠道代理", proxyModes: []string{""},
+			wantTitle: "via-channel-proxy", wantChannel: 1,
+		},
+		{
+			name: "direct 强制直连不走渠道代理", proxyModes: []string{model.ProxyModeDirect},
+			// 直连时用 key 级 base_url 指向可达的真实上游 stub，证明请求绕过了渠道代理。
+			baseURLs: []string{"PROVIDER_STUB"}, wantTitle: "direct-connection", wantChannel: 0,
+		},
+		{
+			name: "custom 用 key 自己的代理", proxyModes: []string{model.ProxyModeCustom}, proxyURLs: []string{"KEY_PROXY_STUB"},
+			wantTitle: "via-key-proxy", wantKeyProxy: 1,
+		},
+		{
+			name: "custom 地址为空回退渠道代理", proxyModes: []string{model.ProxyModeCustom}, proxyURLs: []string{"   "},
+			wantTitle: "via-channel-proxy", wantChannel: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			requireHostLoopbackProxy(t)
+
+			var channelHits, keyProxyHits, providerHits int32
+			channelProxy := newProxyStubServer(t, "via-channel-proxy", &channelHits)
+			keyProxy := newProxyStubServer(t, "via-key-proxy", &keyProxyHits)
+			providerStub := newTavilyStubServer(t, "direct-connection", http.StatusOK, &providerHits)
+
+			providerBaseURL := "http://127.0.0.1:1"
+			keyPool := &orchestratorTestKeyPool{proxyModes: tc.proxyModes}
+			keyPool.proxyURLs = replacePlaceholder(tc.proxyURLs, "KEY_PROXY_STUB", keyProxy.URL)
+			keyPool.baseURLs = replacePlaceholder(tc.baseURLs, "PROVIDER_STUB", providerStub.URL)
+
+			orch := newTavilyTestOrchestrator(keyPool, providerBaseURL, channelProxy.URL, 0)
+			resp, err := orch.Search(context.Background(), keyBaseURLTestRequest(), "req-key-proxy-mode", 0)
+			if err != nil {
+				t.Fatalf("Search returned error: %v", err)
+			}
+			if len(resp.Results) != 1 || resp.Results[0].Title != tc.wantTitle {
+				t.Fatalf("results = %+v, want title %q", resp.Results, tc.wantTitle)
+			}
+			if got := atomic.LoadInt32(&channelHits); got != tc.wantChannel {
+				t.Fatalf("渠道代理命中 = %d, want %d", got, tc.wantChannel)
+			}
+			if got := atomic.LoadInt32(&keyProxyHits); got != tc.wantKeyProxy {
+				t.Fatalf("key 代理命中 = %d, want %d", got, tc.wantKeyProxy)
+			}
+		})
+	}
+}
+
+// replacePlaceholder 把表驱动用例里的占位串换成运行时才知道的 stub 地址（stub 起在用例内部）。
+func replacePlaceholder(values []string, placeholder, replacement string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	replaced := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == placeholder {
+			value = replacement
+		}
+		replaced = append(replaced, value)
+	}
+	return replaced
 }
 
 // 重试换 key 时必须按新 key 重建 adapter：两个 key 指向不同中转站，第一次失败后第二次要打到新地址。

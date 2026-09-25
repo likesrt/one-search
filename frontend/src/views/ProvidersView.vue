@@ -131,6 +131,16 @@
                         />
                         <p class="muted key-base-url-hint">{{ keyBaseURLHint }}</p>
                         <p v-if="shouldWarnCustomBaseURL(draftKeyBaseURL)" class="muted key-base-url-hint">{{ KEY_BASE_URL_HINT_CUSTOM }}</p>
+                        <el-select v-model="draftProxyMode" class="key-input" placeholder="代理模式">
+                          <el-option v-for="item in KEY_PROXY_MODE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
+                        </el-select>
+                        <el-input
+                          v-if="draftProxyMode === 'custom'"
+                          v-model="draftProxyURL"
+                          class="key-input"
+                          placeholder="http://127.0.0.1:7897"
+                        />
+                        <p class="muted key-base-url-hint">{{ keyProxyHint(draftProxyMode, draftProxyURL) }}</p>
                       </div>
                       <div class="new-key-actions">
                         <el-tooltip content="保存密钥" placement="top">
@@ -160,6 +170,7 @@
                           </el-tooltip>
                           <span v-if="row.provider_name === 'exa'">{{ row.exa_service_key_hint ? `x-api-key ${row.exa_service_key_hint}` : '本地计费' }}</span>
                           <span v-if="row.base_url" :title="row.base_url">URL {{ hostOf(row.base_url) }}</span>
+                          <span v-if="keyProxyMeta(row)" :title="row.proxy_url || ''">{{ keyProxyMeta(row) }}</span>
                         </div>
                       </div>
                       <el-tooltip content="编辑密钥" placement="top">
@@ -328,6 +339,15 @@
           <div class="key-base-url-hint muted">{{ keyBaseURLHint }}</div>
           <div v-if="shouldWarnCustomBaseURL(keyForm.base_url)" class="key-base-url-hint muted">{{ KEY_BASE_URL_HINT_CUSTOM }}</div>
         </el-form-item>
+        <el-form-item label="代理模式">
+          <el-select v-model="keyForm.proxy_mode" class="key-proxy-select">
+            <el-option v-for="item in KEY_PROXY_MODE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+          <div class="key-base-url-hint muted">{{ keyProxyHint(keyForm.proxy_mode, keyForm.proxy_url) }}</div>
+        </el-form-item>
+        <el-form-item v-if="keyForm.proxy_mode === 'custom'" label="代理地址">
+          <el-input v-model="keyForm.proxy_url" placeholder="http://127.0.0.1:7897" />
+        </el-form-item>
         <el-form-item label="权重（1-10000，越大越优先）">
           <el-input-number v-model="keyForm.weight" :min="1" :max="10000" controls-position="right" />
         </el-form-item>
@@ -377,10 +397,12 @@ const creatingRow = ref(false)
 const keyDialog = ref(false)
 const editingKey = ref<EditableKey | null>(null)
 const savingKey = ref(false)
-const keyForm = reactive({ alias: '', weight: 1, rpm_limit: 0, daily_quota: 0, monthly_quota: 0, base_url: '', exa_service_key: '' })
+const keyForm = reactive({ alias: '', weight: 1, rpm_limit: 0, daily_quota: 0, monthly_quota: 0, base_url: '', proxy_mode: 'inherit', proxy_url: '', exa_service_key: '' })
 const draftKey = ref('')
 const draftExaServiceKey = ref('')
 const draftKeyBaseURL = ref('')
+const draftProxyMode = ref('inherit')
+const draftProxyURL = ref('')
 const testingKeyId = ref<number | null>(null)
 const quotaLoadingKeyId = ref<number | null>(null)
 const copyingKeyId = ref<number | null>(null)
@@ -464,7 +486,10 @@ const DEFAULT_PROVIDER_PRICING: Record<string, { price_per_request: number; pric
   serper: { price_per_request: 0.001, price_per_credit: 0.001, price_per_token: 0, default_billable_credits: 1 },
   brave: { price_per_request: 0.005, price_per_credit: 0, price_per_token: 0, default_billable_credits: 0 },
   firecrawl: { price_per_request: 0.00166, price_per_credit: 0.00083, price_per_token: 0, default_billable_credits: 2 },
-  jina: { price_per_request: 0.0005, price_per_credit: 0, price_per_token: 0.00000005, default_billable_credits: 0 }
+  jina: { price_per_request: 0.0005, price_per_credit: 0, price_per_token: 0.00000005, default_billable_credits: 0 },
+  // Keenable 未公开按次单价（官方口径是「以响应为准」而响应不含 cost），
+  // 因此给 0 —— 不产生费用估算比填一个假单价诚实，需要的话在渠道 settings 里覆盖。
+  keenable: { price_per_request: 0, price_per_credit: 0, price_per_token: 0, default_billable_credits: 0 }
 }
 
 function defaultPricingFor(name: string) {
@@ -488,12 +513,38 @@ const providerProxyURL = computed<string>({
 
 // key 级基础 URL 的填写说明按渠道区分：只有 Brave 的默认地址带路径前缀
 // （https://api.search.brave.com/res/v1），覆盖时必须写全否则 404；
-// 其余 6 家默认地址是纯 host，不需要这段警告。
-const KEY_BASE_URL_HINT_BASE = '留空则使用渠道默认地址'
-const KEY_BASE_URL_HINT_BRAVE = '留空则使用渠道默认地址；Brave 默认含 /res/v1 路径前缀，指向中转站时需写全，否则会 404'
+// 其余 7 家默认地址是纯 host，不需要这段警告。
+const KEY_BASE_URL_HINT_BASE = '留空则使用渠道默认地址；以 # 开头表示该地址即完整端点，网关不再拼接自己的路径（例如 #https://api.tavily.com/search）'
+const KEY_BASE_URL_HINT_BRAVE = '留空则使用渠道默认地址；Brave 默认含 /res/v1 路径前缀，指向中转站时需写全，否则会 404。以 # 开头表示该地址即完整端点，网关不再拼接自己的路径'
 // 自定义地址意味着请求不走官方端点，而官方额度查询接口硬编码各家官方域名
 // （见后端 quota.go），因此额度查询结果不再对应该 key 的实际通道，回退本地计费。
 const KEY_BASE_URL_HINT_CUSTOM = '使用自定义地址后，官方额度查询不再适用（它只请求官方端点），该 Key 将按本地计费配置估算费用'
+
+// key 级代理三态的选项，取值与后端 model.ProxyMode* 常量一一对应。
+const KEY_PROXY_MODE_OPTIONS = [
+  { label: '跟随渠道代理', value: 'inherit' },
+  { label: '强制直连', value: 'direct' },
+  { label: '使用独立代理', value: 'custom' }
+]
+
+/**
+ * 生成 key 级代理模式的说明文案，按模式区分，并读取当前渠道弹窗里的渠道级代理状态：
+ * 「跟随渠道」是否真的会走代理，取决于渠道级代理开关与地址，必须让用户在当前上下文里看到。
+ * @param mode 当前选择的代理模式 inherit/direct/custom
+ * @param url custom 模式下的代理地址（可为空）
+ * @returns 展示在控件下方的说明文案
+ */
+function keyProxyHint(mode: string, url: string): string {
+  const channel = providerProxyEnabled.value && providerProxyURL.value.trim()
+    ? `渠道级：${providerProxyURL.value.trim()}`
+    : '渠道级：未启用'
+  if (mode === 'direct') return `强制直连，忽略渠道级代理（${channel}）`
+  if (mode === 'custom') {
+    // 地址留空回退渠道级而不是直连：静默改变出口比沿用渠道级更危险。
+    return url.trim() ? `使用该密钥自己的代理地址（${channel}）` : `地址留空则回退渠道级代理，不会强制直连（${channel}）`
+  }
+  return `跟随渠道级代理，渠道未启用时直连（${channel}）`
+}
 
 const keyBaseURLHint = computed(() => {
   const provider = providerForm.value?.name
@@ -558,6 +609,12 @@ const providerDefaultBillableCredits = computed<number>({
   }
 })
 
+/**
+ * 显示渠道卡片的短标识（Y/J/E/T/F/S/B/K）。
+ * 未匹配到已知渠道时退化为名称首字母大写，因此新增渠道不写在这里也不会崩。
+ * @param name 渠道名（provider.name）
+ * @returns 单个大写字母
+ */
 function providerShortName(name: string) {
   if (/you/i.test(name)) return 'Y'
   if (/jina/i.test(name)) return 'J'
@@ -566,15 +623,39 @@ function providerShortName(name: string) {
   if (/firecrawl/i.test(name)) return 'F'
   if (/serper/i.test(name)) return 'S'
   if (/brave/i.test(name)) return 'B'
+  if (/keenable/i.test(name)) return 'K'
   return (name || 'S').slice(0, 1).toUpperCase()
 }
 
+/**
+ * 从 URL 中取主机名用于列表展示。
+ * 以 `#` 开头的配置表示「该地址即完整端点」，而 `#` 是 URL 的 fragment 分隔符，
+ * 直接 new URL('#https://x/y') 会得到空 host 并走进 catch，旧实现会退化成 `#https:` 这种展示，
+ * 因此先剥掉前缀再解析。
+ * @param url 渠道或 key 的 base_url，可为空
+ * @returns 主机名；解析失败时退化为去掉协议的原始串
+ */
 function hostOf(url: string) {
+  const value = url.trim().replace(/^#/, '')
   try {
-    return new URL(url).host || url
+    return new URL(value).host || value
   } catch {
-    return url.replace(/^https?:\/\//, '').split('/')[0] || url
+    return value.replace(/^https?:\/\//, '').split('/')[0] || url
   }
+}
+
+/**
+ * 生成 key 行上的代理状态文案：只在代理行为与「跟随渠道」不同时才返回非空，
+ * 避免每行都多出一段无信息量的文字。
+ * @param row 密钥视图行，读取 proxy_mode / proxy_url
+ * @returns '直连'、'代理 <host>' 之类的短文案，跟随渠道时返回空串
+ */
+function keyProxyMeta(row: EditableKey) {
+  const mode = (row.proxy_mode || 'inherit').trim()
+  if (mode === 'direct') return '直连'
+  if (mode !== 'custom') return ''
+  const url = (row.proxy_url || '').trim()
+  return url ? `代理 ${hostOf(url)}` : '代理 跟随渠道'
 }
 
 function formatNumber(value?: number) {
@@ -714,14 +795,20 @@ async function saveProvider() {
 
 /**
  * 校验 key 级基础 URL：留空放行（回退渠道默认）；非空时必须是 http/https 绝对地址。
- * 与后端 validateProviderKeyBaseURL 保持一致，提前给出提示而不是等 400。
+ * 与后端 validateProviderKeyBaseURL 保持一致（含 `#` 完整端点语法与 Jina 拒绝规则），
+ * 提前给出提示而不是等 400。
+ * @param value 输入框中的基础 URL（可为空）
  * @returns 错误提示文案；校验通过时返回空串
  */
 function keyBaseURLError(value: string): string {
   const trimmed = value.trim()
   if (!trimmed) return ''
+  // `#` 前缀表示「该地址即完整端点」，校验的是剥掉前缀后的部分。
+  const exact = trimmed.startsWith('#')
+  if (exact && providerForm.value?.name === 'jina') return 'Jina 的搜索词拼在 URL 路径中，不支持 # 完整端点语法'
+  const target = exact ? trimmed.slice(1).trim() : trimmed
   try {
-    const parsed = new URL(trimmed)
+    const parsed = new URL(target)
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '基础 URL 必须以 http:// 或 https:// 开头'
     if (!parsed.host) return '基础 URL 缺少主机名'
     return ''
@@ -730,20 +817,35 @@ function keyBaseURLError(value: string): string {
   }
 }
 
+/**
+ * 打开「新建密钥」行内输入区，并把草稿状态复位到默认值。
+ * 代理模式默认 inherit（跟随渠道），避免上一次的草稿残留到新建的密钥上。
+ */
 function startCreateKey() {
   creatingRow.value = true
   draftKey.value = ''
   draftExaServiceKey.value = ''
   draftKeyBaseURL.value = ''
+  draftProxyMode.value = 'inherit'
+  draftProxyURL.value = ''
 }
 
+/**
+ * 取消「新建密钥」行内输入区：收起义行并清空全部草稿（含明文密钥，避免留在内存里）。
+ */
 function cancelCreateKey() {
   creatingRow.value = false
   draftKey.value = ''
   draftExaServiceKey.value = ''
   draftKeyBaseURL.value = ''
+  draftProxyMode.value = 'inherit'
+  draftProxyURL.value = ''
 }
 
+/**
+ * 保存行内新建的密钥。base_url 与 proxy_url 都只在对应模式下有意义：
+ * 非 custom 模式一律提交空串，避免在库里留下一条「切回 custom 就突然生效」的陈旧地址。
+ */
 async function createKey() {
   if (!providerForm.value) return
   if (!draftKey.value.trim()) { ElMessage.warning('请填写平台密钥'); return }
@@ -753,7 +855,7 @@ async function createKey() {
   const exaServiceKey = draftExaServiceKey.value.trim()
   creatingKey.value = true
   try {
-    await api.createKey({ provider_name: providerForm.value.name, alias: `${providerForm.value.name}-${Date.now()}`, key: draftKey.value.trim(), exa_service_key: exaServiceKey, base_url: baseURL, weight: 1, rpm_limit: 0, daily_quota: 0, monthly_quota: 0 })
+    await api.createKey({ provider_name: providerForm.value.name, alias: `${providerForm.value.name}-${Date.now()}`, key: draftKey.value.trim(), exa_service_key: exaServiceKey, base_url: baseURL, proxy_mode: draftProxyMode.value, proxy_url: draftProxyMode.value === 'custom' ? draftProxyURL.value.trim() : '', weight: 1, rpm_limit: 0, daily_quota: 0, monthly_quota: 0 })
     ElMessage.success(providerForm.value.name === 'exa' && !exaServiceKey ? '密钥已添加，将使用本地计算费用模式' : '密钥已添加')
     cancelCreateKey()
     await load()
@@ -762,6 +864,12 @@ async function createKey() {
   }
 }
 
+/**
+ * 把某条密钥的当前值灌进编辑弹窗的表单状态。
+ * 代理模式缺省视为 inherit（老数据或字段缺失时语义为「跟随渠道」）；
+ * Exa 管理密钥因列表只返回脱敏 hint，这里恒置空串（后端把空串解释为「不修改」）。
+ * @param row 密钥视图行
+ */
 function openKeyEdit(row: EditableKey) {
   editingKey.value = row
   keyForm.alias = row.alias || ''
@@ -770,12 +878,21 @@ function openKeyEdit(row: EditableKey) {
   keyForm.daily_quota = row.daily_quota || 0
   keyForm.monthly_quota = row.monthly_quota || 0
   keyForm.base_url = row.base_url || ''
+  keyForm.proxy_mode = row.proxy_mode || 'inherit'
+  keyForm.proxy_url = row.proxy_url || ''
   // 管理密钥已加密存储、列表只返回脱敏 hint，因此这里恒为空串：
   // 后端对空串的语义是"不修改"，正好让用户按需覆盖而不会误清除。
   keyForm.exa_service_key = ''
   keyDialog.value = true
 }
 
+/**
+ * 保存编辑弹窗里的密钥改动（PATCH /api/admin/keys/{id}）。
+ * 校验不通过时只弹提示、不发请求；base_url 与 proxy_url 都提交 trim 后的值，
+ * 其中空串是有意义的值（清除该字段的覆盖），因此不能省略这两个键。
+ * 非 custom 模式下一并清空 proxy_url，避免留下切回 custom 就突然生效的陈旧地址。
+ * 副作用：成功后关闭弹窗并重新拉取列表。
+ */
 async function saveKey() {
   if (!editingKey.value) return
   if (!keyForm.alias.trim()) { ElMessage.warning('请填写密钥别名'); return }
@@ -791,7 +908,10 @@ async function saveKey() {
       daily_quota: keyForm.daily_quota,
       monthly_quota: keyForm.monthly_quota,
       // 空串是有效值：表示清除 key 级覆盖、回退渠道默认地址
-      base_url: keyForm.base_url.trim()
+      base_url: keyForm.base_url.trim(),
+      proxy_mode: keyForm.proxy_mode,
+      // 非 custom 模式下代理地址不生效，一并清空，避免留下切回 custom 就突然生效的陈旧地址
+      proxy_url: keyForm.proxy_mode === 'custom' ? keyForm.proxy_url.trim() : ''
     }
     // exa_service_key 只在填写时才放进 payload：后端把空串视为"不修改"，
     // 而列表接口只返回脱敏 hint、拿不到原值，无条件发送空串虽无害但语义含糊。
@@ -1032,6 +1152,14 @@ onMounted(load)
 .base-url-input :deep(.el-input__wrapper),
 .key-input :deep(.el-input__wrapper) {
   height: 42px;
+}
+/* 代理模式下拉在密钥弹窗里独占一行，宽度跟随表单而不是 Element 默认的行内宽度 */
+.key-proxy-select {
+  width: 100%;
+}
+/* 行内新建区里的下拉与同排的 el-input 保持等高：Element Plus 2.10 的下拉用的是 select__wrapper */
+.key-input.el-select :deep(.el-select__wrapper) {
+  min-height: 42px;
 }
 .api-key-list {
   display: flex;

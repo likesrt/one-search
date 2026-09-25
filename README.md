@@ -2,7 +2,7 @@
 
 自托管 Web Search API 中转 / 聚合网关。
 
-统一接入 Exa、You.com、Jina、Tavily、Firecrawl、Serper、Brave，提供：
+统一接入 Exa、You.com、Jina、Tavily、Firecrawl、Serper、Brave、Keenable，提供：
 
 - 统一搜索接口 `POST /v1/search`（`parallel` / `fallback` / `single`）
 - Tavily / Serper / OpenAI 兼容接口
@@ -155,7 +155,6 @@ enabled_tools = ["search"]
 | `ADMIN_SESSION_TTL_HOURS` | `24` | 管理 Session 时长 |
 | `ADMIN_LOGIN_MAX_ATTEMPTS` 等 | 5 / 5min / 15min | 登录限速与锁定 |
 | `VITE_API_BASE` | 空 | 前后端分离开发时指向后端 |
-| `ONE_SEARCH_HTTP(S)_PROXY` | 空 | 容器访问上游时的代理 |
 
 公网请在前面加 HTTPS 反代，转发 `/`、`/api/`、`/v1/`、`/healthz`（以及 `/mcp`）。
 

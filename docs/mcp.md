@@ -93,7 +93,7 @@ Authorization: Bearer oak_xxx
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `query` | string | 是 | 搜索关键词。 |
-| `providers` | string[] | 否 | 限定 Provider：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`。为空时使用系统默认配置；新库初始化和默认 fallback 为这七个内置 Provider。 |
+| `providers` | string[] | 否 | 限定 Provider：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`。为空时使用系统默认配置；新库初始化和默认 fallback 为这八个内置 Provider。 |
 | `mode` | string | 否 | `parallel`、`fallback`、`single`。 |
 | `limit` | number | 否 | 返回结果数，后端最大限制 50。 |
 | `freshness` | string | 否 | 预留给 Provider 或兼容逻辑的时间新鲜度提示。 |
@@ -180,7 +180,7 @@ curl -X POST "$BASE_URL/mcp" \
       "name": "search",
       "arguments": {
         "query": "latest web search APIs",
-        "providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave"],
+        "providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable"],
         "mode": "parallel",
         "limit": 5,
         "cache": "default"

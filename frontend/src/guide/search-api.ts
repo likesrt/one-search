@@ -57,7 +57,7 @@ Content-Type: application/json`
           columns: ['字段', '类型', '必填', '说明'],
           rows: [
             ['`query`', 'string', '是', '搜索词。首尾空白会被裁掉；裁掉后为空返回 400 `query is required`'],
-            ['`providers`', 'string[]', '否', '渠道白名单，取值 `exa`/`you`/`jina`/`tavily`/`firecrawl`/`serper`/`brave`。不传时用系统默认平台，再回退内置七家'],
+            ['`providers`', 'string[]', '否', '渠道白名单，取值 `exa`/`you`/`jina`/`tavily`/`firecrawl`/`serper`/`brave`/`keenable`。不传时用系统默认平台，再回退内置八家'],
             ['`mode`', 'string', '否', '`parallel` / `fallback` / `single`，默认取「默认模式」（出厂 `parallel`）'],
             ['`limit`', 'number', '否', '返回结果数上限。`<= 0` 时取「汇总返回结果数」，再回退 10'],
             ['`freshness`', 'string', '否', '时间新鲜度提示，由各渠道自行解释（见「渠道配置详解」）'],
@@ -76,7 +76,7 @@ Content-Type: application/json`
         },
         {
           type: 'paragraph',
-          text: '`options` 是一个自由对象，不同渠道读取不同的键：`exa` 目前不读取任何键；`you` 不读取；`jina` 不读取；`tavily` 读 `search_depth`、`topic`、`time_range`/`timeRange`、`country`、`days`、`include_domains`/`includeDomains`、`exclude_domains`/`excludeDomains`；`firecrawl` 读 `tbs`、`country`、`location`、`include_domains`、`exclude_domains`、`timeout`；`serper` 读 `page`、`tbs`、`gl`/`country`、`hl`/`locale`/`language`、`location`；`brave` 读 `freshness`、`country`、`search_lang`/`searchLang`/`hl`/`language`、`ui_lang`/`uiLang`/`locale`、`safesearch`/`safe_search`/`safeSearch`、`offset`、`page`。'
+          text: '`options` 是一个自由对象，不同渠道读取不同的键：`exa` 目前不读取任何键；`you` 不读取；`jina` 不读取；`tavily` 读 `search_depth`、`topic`、`time_range`/`timeRange`、`country`、`days`、`include_domains`/`includeDomains`、`exclude_domains`/`excludeDomains`；`firecrawl` 读 `tbs`、`country`、`location`、`include_domains`、`exclude_domains`、`timeout`；`serper` 读 `page`、`tbs`、`gl`/`country`、`hl`/`locale`/`language`、`location`；`brave` 读 `freshness`、`country`、`search_lang`/`searchLang`/`hl`/`language`、`ui_lang`/`uiLang`/`locale`、`safesearch`/`safe_search`/`safeSearch`、`offset`、`page`；`keenable` 读 `mode`（`pro` 默认 / `realtime`）、`site`、`acquired_after`、`acquired_before`、`published_after`、`published_before`、`query_time`、`snippet_max_length`。'
         }
       ]
     },
