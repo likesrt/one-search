@@ -16,6 +16,13 @@ import (
 const (
 	mcpLatestProtocolVersion  = "2025-06-18"
 	mcpDefaultProtocolVersion = "2025-03-26"
+	// mcpRecommendedLimit 是给模型的 limit 建议值。
+	//
+	// 服务端按渠道级 request_result_limit 逐渠道取数（见 orchestrator.callProvider），
+	// 该值大于 0 时会替换请求里的 limit，最终合并结果再按请求的 limit 截断。
+	// 因此 limit 传得过小时，上游已经取回并计费的结果大部分会被丢弃。
+	// instructions 与 search 工具 schema 的 limit 描述共用此常量，避免两处建议值不一致。
+	mcpRecommendedLimit = 15
 )
 
 var mcpSupportedProtocolVersions = []string{mcpLatestProtocolVersion, mcpDefaultProtocolVersion, "2024-11-05"}
@@ -405,6 +412,11 @@ func (h *Handler) mcpAuthContext(r *http.Request) (context.Context, int, string,
 // 搜索与网页抓取。只写搜索会让模型在需要读某个具体页面时不知道还有 fetch 可用，
 // 从而退化为臆造内容。
 //
+// instructions 额外要求模型为 search 显式传 limit >= mcpRecommendedLimit。
+// 这只是一句「建议」：MCP 规范把 instructions 定义为可选的提示（客户端 MAY 注入系统提示词），
+// 客户端与模型都可能忽略，服务端也没有据此做任何强制。要真正收敛取数条数需改编排层
+// （渠道级 request_result_limit 目前是无条件覆盖），本函数不负责那件事。
+//
 // 副作用：无。
 func mcpInitializeResult(params json.RawMessage) map[string]interface{} {
 	return map[string]interface{}{
@@ -419,7 +431,7 @@ func mcpInitializeResult(params json.RawMessage) map[string]interface{} {
 			"title":   "One Search Relay",
 			"version": "0.1.0",
 		},
-		"instructions": "Use the search tool to run live web searches on the public internet and get ranked results with titles, URLs and snippets. Call it whenever the user asks about recent events, current or up-to-date facts, or anything that requires information from the web. Use the fetch tool to read a specific URL — a page the user linked or a result returned by search — and get its content as compact Markdown; it fetches the page over plain HTTP and does not run JavaScript, so client-rendered pages come back empty.",
+		"instructions": fmt.Sprintf("Use the search tool to run live web searches on the public internet and get ranked results with titles, URLs and snippets. Call it whenever the user asks about recent events, current or up-to-date facts, or anything that requires information from the web. Use the fetch tool to read a specific URL — a page the user linked or a result returned by search — and get its content as compact Markdown; it fetches the page over plain HTTP and does not run JavaScript, so client-rendered pages come back empty. Always pass an explicit limit of at least %d to the search tool — a smaller limit discards results that were already fetched from the providers and billed, and you can always ignore the extra ones.", mcpRecommendedLimit),
 	}
 }
 
@@ -453,6 +465,10 @@ func negotiateMCPProtocolVersion(params json.RawMessage) string {
 // 其中只有 query 为必填。description 直接决定模型是否选中本工具，必须显式点明
 // 「实时联网搜索」并给出适用场景，避免被误判为本地知识库检索。
 //
+// limit 的描述刻意写成「建议至少 mcpRecommendedLimit」而非只报上限：schema 的
+// minimum 只能拦住 0，拦不住「传 3」。上限值仅为文档性声明，服务端编排并不做全局钳制
+// （渠道级 request_result_limit 与各适配器各自设限）。
+//
 // 副作用：无。
 func mcpSearchToolSchema() map[string]interface{} {
 	return map[string]interface{}{
@@ -478,9 +494,12 @@ func mcpSearchToolSchema() map[string]interface{} {
 				},
 				"limit": map[string]interface{}{
 					"type":        "integer",
-					"description": "Maximum results, capped at 50.",
+					"description": fmt.Sprintf("Maximum results to return. Pass at least %d — a smaller limit throws away results that were already fetched from the providers and billed. Capped at 50.", mcpRecommendedLimit),
 					"minimum":     1,
 					"maximum":     50,
+					// default 是 JSON Schema 标准关键字，部分客户端会用它预填参数；
+					// 它只影响客户端是否替模型补值，服务端仍按自己的规则处理缺省。
+					"default": mcpRecommendedLimit,
 				},
 				"freshness": map[string]interface{}{
 					"type":        "string",

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -174,6 +175,51 @@ func TestMCPStreamableHTTPHandshakeAndListTools(t *testing.T) {
 		if enumValues[index] != provider {
 			t.Fatalf("providers enum[%d] = %v, want %s", index, enumValues[index], provider)
 		}
+	}
+}
+
+// TestMCPLimitAdviceIsConsistentAcrossInstructionsAndSchema 验证给模型的 limit 建议值
+// 在 instructions 与 search 工具 schema 里保持一致。
+//
+// 两处文案都由常量 mcpRecommendedLimit 生成，本用例是防回归的哨兵：若有人只把其中一处
+// 写回硬编码，建议值就会分叉，模型收到的两条信息自相矛盾。
+//
+// 边界条件：只断言「包含建议值」，不做逐字比对，避免文案微调即失败。
+func TestMCPLimitAdviceIsConsistentAcrossInstructionsAndSchema(t *testing.T) {
+	h := &Handler{}
+	r := chi.NewRouter()
+	h.mountMCP(r, "/mcp")
+
+	initRec := mcpPost(t, r, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`)
+	var initResp struct {
+		Result struct {
+			Instructions string `json:"instructions"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(initRec.Body.Bytes(), &initResp); err != nil {
+		t.Fatalf("decode initialize response: %v", err)
+	}
+	advice := strconv.Itoa(mcpRecommendedLimit)
+	if !strings.Contains(initResp.Result.Instructions, advice) {
+		t.Fatalf("instructions 未包含建议值 %s: %q", advice, initResp.Result.Instructions)
+	}
+
+	toolsResp := mcpListTools(t, r)
+	tool, ok := mcpToolByName(toolsResp.Result.Tools, "search")
+	if !ok {
+		t.Fatalf("search tool missing: %+v", toolsResp.Result.Tools)
+	}
+	properties, ok := tool.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("tool properties missing: %+v", tool.InputSchema)
+	}
+	limitSchema, ok := properties["limit"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("limit schema missing: %+v", properties)
+	}
+	description, _ := limitSchema["description"].(string)
+	if !strings.Contains(description, advice) {
+		t.Fatalf("limit 描述未包含建议值 %s: %q", advice, description)
 	}
 }
 

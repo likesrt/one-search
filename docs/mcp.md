@@ -95,7 +95,7 @@ Authorization: Bearer oak_xxx
 | `query` | string | 是 | 搜索关键词。 |
 | `providers` | string[] | 否 | 限定 Provider：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`。为空时使用系统默认配置；新库初始化和默认 fallback 为这八个内置 Provider。 |
 | `mode` | string | 否 | `parallel`、`fallback`、`single`。 |
-| `limit` | number | 否 | 返回结果数，后端最大限制 50。 |
+| `limit` | number | 否 | 返回结果数，后端最大限制 50。**建议显式传 15**：渠道级 `request_result_limit` 大于 0 时，服务端会按该值逐渠道取数（与请求里的 `limit` 无关），最终合并结果再按 `limit` 截断。传得过小会让已经取回并计费的结果被丢弃。 |
 | `freshness` | string | 否 | 预留给 Provider 或兼容逻辑的时间新鲜度提示。 |
 | `dedupe` | boolean | 否 | 是否按 URL 去重。 |
 | `cache` | string | 否 | `default`、`bypass`、`refresh`。 |

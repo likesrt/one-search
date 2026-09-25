@@ -167,7 +167,7 @@ export const mcpChapter: DocChapter = {
             ['`query`', 'string', '**必填**，裁剪空白后不能为空，否则 `-32602` `query is required`'],
             ['`providers`', 'array', '枚举八家渠道'],
             ['`mode`', 'string', '枚举 `parallel` / `fallback` / `single`'],
-            ['`limit`', 'integer', 'schema 声明 `minimum: 1`、`maximum: 50`（这是 schema 层声明，服务端编排仍按自己的规则处理）'],
+            ['`limit`', 'integer', 'schema 声明 `minimum: 1`、`maximum: 50`。**建议显式传 15**（`instructions` 与 schema 描述里都写明了这点）：渠道级 `request_result_limit` 大于 0 时会按该值逐渠道取数，传得过小会让已取回并计费的结果被丢弃。（`minimum`/`maximum` 是 schema 层声明，服务端编排仍按自己的规则处理）'],
             ['`freshness`', 'string', '自由文本'],
             ['`dedupe`', 'boolean', '按 URL 去重'],
             ['`cache`', 'string', '枚举 `default` / `bypass` / `refresh`'],
