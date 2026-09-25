@@ -188,6 +188,7 @@ export interface ApiToken {
   name: string
   token_prefix: string
   token?: string
+  /** 纯元数据：后端无任何按 scopes 的鉴权逻辑，它不限制可用接口或渠道。 */
   scopes: string[]
   allowed_providers: string[]
   status: string

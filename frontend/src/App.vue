@@ -36,6 +36,10 @@
           <el-icon><Setting /></el-icon>
           <span>系统设置</span>
         </el-menu-item>
+        <el-menu-item index="/docs" title="使用文档">
+          <el-icon><Reading /></el-icon>
+          <span>使用文档</span>
+        </el-menu-item>
       </el-menu>
 
       <div class="float-foot">
@@ -69,6 +73,7 @@ import {
   Key,
   List,
   Odometer,
+  Reading,
   Search,
   Setting,
   SwitchButton

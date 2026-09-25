@@ -633,11 +633,17 @@ func (s *Store) ListAPITokens(ctx context.Context) ([]model.APIToken, error) {
 	return items, rows.Err()
 }
 
+// CreateAPIToken 创建外部 API 令牌并返回明文（明文只在此处产生一次）。
+//
+// scopes 为纯元数据：仅做「空则补 ['search']」的缺省处理后原样落库，
+// 不参与任何鉴权判断（详见 model.APIToken.Scopes 的说明）。
+// 参数校验不严格，name 为空也会被接受；调用方（handler）负责传参。
 func (s *Store) CreateAPIToken(ctx context.Context, name string, scopes []string, allowedProviders []string, rateLimit, dailyQuota, monthlyQuota int) (model.APIToken, string, error) {
 	rawToken, err := security.RandomToken("osr_")
 	if err != nil {
 		return model.APIToken{}, "", err
 	}
+	// 空 scopes 补默认值，避免落库成空数组；这只是形状上的缺省，不是权限判定。
 	if len(scopes) == 0 {
 		scopes = []string{"search"}
 	}

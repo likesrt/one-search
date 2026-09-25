@@ -19,6 +19,10 @@ type AdminAPIKey struct {
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 }
 
+// Scopes 目前是纯元数据：仅在创建时按缺省 ["search"] 落库、查询时原样返回，
+// 全项目没有任何按它做鉴权或门控的代码，改它不会限制或放开任何行为。
+// 保留字段是为了兼容既有数据与接口形状；真正生效的约束是 AllowedProviders、
+// RateLimitPerMin 与日/月额度。详见管理台「使用文档 → 凭据与配额」。
 type APIToken struct {
 	ID               int64      `json:"id"`
 	Name             string     `json:"name"`

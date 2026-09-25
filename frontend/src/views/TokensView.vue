@@ -107,6 +107,10 @@ const rawToken = ref('')
 const editingToken = ref<ApiToken | null>(null)
 const form = reactive({
   name: '默认客户端',
+  // scopes 是历史遗留的纯元数据字段：后端不按它做任何鉴权，界面上也从未展示，
+  // 此处仅为满足创建接口的请求形状。注意编辑令牌时后端 updateToken 不读该字段，
+  // 因此它会被静默丢弃——不要尝试用它做权限收敛（真正生效的是 allowed_providers、
+  // RPM 与日/月额度）。详见「使用文档 → 凭据与配额」。
   scopes: ['search'],
   allowed_providers: [] as string[],
   rate_limit_per_min: 0,

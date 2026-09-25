@@ -9,6 +9,7 @@ const PlaygroundView = () => import('../views/PlaygroundView.vue')
 const LogsView = () => import('../views/LogsView.vue')
 const AuditLogsView = () => import('../views/AuditLogsView.vue')
 const SettingsView = () => import('../views/SettingsView.vue')
+const DocsView = () => import('../views/DocsView.vue')
 
 const router = createRouter({
   history: createWebHistory(),
@@ -22,7 +23,10 @@ const router = createRouter({
     { path: '/logs', component: LogsView },
     { path: '/audit', component: AuditLogsView },
     { path: '/usage', redirect: '/' },
-    { path: '/settings', component: SettingsView }
+    { path: '/settings', component: SettingsView },
+    // 刻意不设 meta.public：使用文档会把渠道参数、配错后果等内部细节摊开，
+    // 必须与其余功能页一样先登录才能查看。
+    { path: '/docs', component: DocsView }
   ]
 })
 
