@@ -20,3 +20,4 @@ coverage/
 .pi-subagents/
 docs/
 data/
+.claude/
