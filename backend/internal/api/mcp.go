@@ -300,6 +300,19 @@ func (h *Handler) mcpAuthContext(r *http.Request) (context.Context, int, string,
 	return ctx, http.StatusOK, "", nil
 }
 
+// mcpInitializeResult 构造 initialize 方法的返回结果，向客户端声明协议版本、能力集与服务端身份。
+//
+// 参数：
+//   - params：客户端 initialize 请求的原始 params，其中 protocolVersion 用于版本协商。
+//
+// 返回值：符合 MCP initialize 结果结构的 map，含 protocolVersion、capabilities、
+// serverInfo 与 instructions。
+//
+// 边界条件：params 为空、解析失败或 protocolVersion 不受支持时，版本协商回退为默认版本。
+// instructions 是模型理解本服务用途的主要入口，措辞必须明确指向「实时联网网页搜索」，
+// 否则模型易将其误判为本地知识库或内部检索而回避调用。
+//
+// 副作用：无。
 func mcpInitializeResult(params json.RawMessage) map[string]interface{} {
 	return map[string]interface{}{
 		"protocolVersion": negotiateMCPProtocolVersion(params),
@@ -313,7 +326,7 @@ func mcpInitializeResult(params json.RawMessage) map[string]interface{} {
 			"title":   "One Search Relay",
 			"version": "0.1.0",
 		},
-		"instructions": "Use tools/call with the search tool to run web search through configured One Search Relay providers.",
+		"instructions": "Use the search tool to run live web searches on the public internet and get ranked results with titles, URLs and snippets. Call it whenever the user asks about recent events, current or up-to-date facts, or anything that requires information from the web.",
 	}
 }
 
@@ -335,11 +348,24 @@ func negotiateMCPProtocolVersion(params json.RawMessage) string {
 	return mcpDefaultProtocolVersion
 }
 
+// mcpSearchToolSchema 构造 tools/list 返回的 search 工具定义。
+//
+// 参数：无。
+//
+// 返回值：符合 MCP 工具描述结构的 map，含 name、title、description、
+// inputSchema、annotations。
+//
+// 边界条件：inputSchema 仅声明 query、providers、mode、limit、freshness、
+// dedupe、cache、include_raw 八个字段，不含原生接口的 options 与 rerank；
+// 其中只有 query 为必填。description 直接决定模型是否选中本工具，必须显式点明
+// 「实时联网搜索」并给出适用场景，避免被误判为本地知识库检索。
+//
+// 副作用：无。
 func mcpSearchToolSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "search",
 		"title":       "One Search",
-		"description": "Search the web through configured One Search Relay providers.",
+		"description": "Search the live public web and return ranked results with titles, URLs and snippets. Use this tool for recent events, up-to-date facts, or any question that needs information from the open internet.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
