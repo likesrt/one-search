@@ -29,8 +29,9 @@ export const quickstartChapter: DocChapter = {
           columns: ['入口', '路径', '用途'],
           rows: [
             ['原生搜索', '`POST /v1/search`', '字段最全（`mode`/`limit`/`freshness`/`dedupe`/`rerank`/`cache`/`include_raw`/`options`），新接入优先用它'],
+            ['网页抓取', '`GET|POST /v1/fetch`', '抓取指定 URL 的正文，HTML 转紧凑 Markdown 并按字符数截断，可续读；与搜索链路独立'],
             ['兼容接口', '`POST /v1/compat/tavily/search`、`/v1/compat/serper/search`、`/v1/compat/openai/responses-search`', '让已在用 Tavily / Serper / OpenAI 形态的客户端少改代码即可切过来'],
-            ['MCP', '`POST /mcp`（默认路径，可用 `MCP_PATH` 改）', '给 MCP 客户端（Codex / Claude Desktop / Cursor / LobeHub 等）暴露一个 `search` 工具']
+            ['MCP', '`POST /mcp`（默认路径，可用 `MCP_PATH` 改）', '给 MCP 客户端（Codex / Claude Desktop / Cursor / LobeHub 等）暴露 `search` 与 `fetch` 两个工具']
           ]
         },
         {
@@ -155,7 +156,7 @@ adm_xxx   管理台登录会话令牌（登录后自动签发，存在浏览器 
           items: [
             {
               title: '确认服务端已启用 MCP',
-              text: 'MCP 默认关闭。需要在部署环境设置 `MCP_ENABLED=true`（可选 `MCP_PATH`，默认 `/mcp`），重启服务后 `GET /mcp` 应返回含 `"tools": ["search"]` 的 JSON。'
+              text: 'MCP 默认关闭。需要在部署环境设置 `MCP_ENABLED=true`（可选 `MCP_PATH`，默认 `/mcp`），重启服务后 `GET /mcp` 应返回含 `"tools": ["search", "fetch"]` 的 JSON（在管理台「网页抓取」页关闭抓取后只有 `search`）。'
             },
             {
               title: '在客户端填入 URL 与令牌',
@@ -163,7 +164,7 @@ adm_xxx   管理台登录会话令牌（登录后自动签发，存在浏览器 
             },
             {
               title: '用客户端自带的连接测试确认',
-              text: 'Codex 里输入 `/mcp` 应看到 `one_search` 与 `search` 工具；其它客户端应能看到工具列表。拿不到工具列表时先看「MCP 配置 → 排错清单」。'
+              text: 'Codex 里输入 `/mcp` 应看到 `one_search` 与 `search`、`fetch` 两个工具；其它客户端应能看到工具列表。拿不到工具列表时先看「MCP 配置 → 排错清单」。'
             }
           ]
         },

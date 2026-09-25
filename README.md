@@ -5,9 +5,10 @@
 统一接入 Exa、You.com、Jina、Tavily、Firecrawl、Serper、Brave、Keenable，提供：
 
 - 统一搜索接口 `POST /v1/search`（`parallel` / `fallback` / `single`）
+- 网页抓取接口 `GET|POST /v1/fetch`（HTML 转 Markdown、按字符数截断、可续读）
 - Tavily / Serper / OpenAI 兼容接口
-- Web 管理台：Provider、Key、Token、调试、日志、用量、审计
-- 可选 MCP（`search` 工具）
+- Web 管理台：Provider、Key、Token、调试、网页抓取、日志、用量、审计
+- 可选 MCP（`search` + `fetch` 工具）
 
 预览图
 <p>
@@ -68,6 +69,7 @@ curl -X POST http://localhost:5173/v1/search \
 | `/` | 管理台 |
 | `/healthz` | 健康检查 |
 | `/v1/search` | 统一搜索 |
+| `/v1/fetch` | 网页抓取（`GET` 调试用 / `POST` 完整能力） |
 | `/v1/compat/tavily/search` | Tavily 兼容 |
 | `/v1/compat/serper/search` | Serper 兼容 |
 | `/v1/compat/openai/responses-search` | OpenAI 兼容 |
@@ -87,7 +89,7 @@ http://localhost:5173/mcp
 
 ```bash
 curl http://localhost:5173/mcp
-# 应返回 enabled:true、tools:["search"]
+# 应返回 enabled:true、tools:["search","fetch"]（抓取功能在管理台关闭时只有 ["search"]）
 ```
 
 ### Codex
@@ -104,10 +106,11 @@ url = "http://localhost:5173/mcp"
 bearer_token_env_var = "ONE_SEARCH_API_TOKEN"
 enabled = true
 tool_timeout_sec = 60
-enabled_tools = ["search"]
+enabled_tools = ["search", "fetch"]
 ```
 
-启动 Codex 后输入 `/mcp`，应能看到 `one_search` / `search`。
+启动 Codex 后输入 `/mcp`，应能看到 `one_search` / `search` 与 `one_search` / `fetch`。
+`fetch` 需要抓取功能处于启用状态（管理台「网页抓取」页，默认启用）。
 
 ### Claude Desktop / 通用 HTTP MCP
 
@@ -157,6 +160,11 @@ enabled_tools = ["search"]
 | `VITE_API_BASE` | 空 | 前后端分离开发时指向后端 |
 
 公网请在前面加 HTTPS 反代，转发 `/`、`/api/`、`/v1/`、`/healthz`（以及 `/mcp`）。
+
+网页抓取的开关、代理与超时不在 `.env` 里，而是管理台「网页抓取」页的运行期配置（存 `settings` 表，
+key `fetch`）：`enabled`（默认开启，关闭后 `/v1/fetch` 返回 404 且 MCP 不再列出 `fetch`）、
+`proxy_url`（默认空，即直连）、`allow_private`（默认关闭，放行内网目标仅限可信内网）、
+`timeout_ms`（默认 30000，上界 60000）。
 
 ## 本地开发
 

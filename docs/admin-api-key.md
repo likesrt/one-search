@@ -155,6 +155,9 @@ curl "$BASE_URL/api/admin/dashboard" \
 | `DELETE` | `/api/admin/tokens/{id}` | 可以 | 删除外部 API Token。 |
 | `GET` | `/api/admin/settings` | 可以 | 获取运行时设置。 |
 | `PUT` | `/api/admin/settings` | 可以 | 覆盖更新运行时设置。 |
+| `GET` | `/api/admin/fetch/settings` | 可以 | 获取「网页抓取」功能配置（`enabled` / `proxy_url` / `allow_private` / `timeout_ms`）。 |
+| `PUT` | `/api/admin/fetch/settings` | 可以 | 覆盖更新「网页抓取」功能配置；`timeout_ms` 必须在 1–60000，写入后写 `fetch.settings.update` 审计。 |
+| `POST` | `/api/admin/fetch/test` | 可以 | 管理台试抓接口，参数与 `POST /v1/fetch` 一致；成功与失败都写 `fetch.test` 审计。 |
 | `GET` | `/api/admin/settings/admin-api-key` | 可以 | 查看管理员 API Key 元信息。 |
 | `POST` | `/api/admin/settings/admin-api-key` | 可以 | 生成/轮换管理员 API Key。 |
 | `GET` | `/api/admin/logs` | 可以 | 获取搜索日志列表。支持 `limit`。 |
@@ -172,6 +175,8 @@ curl "$BASE_URL/api/admin/dashboard" \
 | 方法 | 路径 | 能否使用管理员 API Key | 说明 |
 | --- | --- | --- | --- |
 | `POST` | `/v1/search` | 可以 | 原生搜索接口。 |
+| `GET` | `/v1/fetch` | 可以 | 网页抓取接口（参数走查询串，仅支持出站 GET）。 |
+| `POST` | `/v1/fetch` | 可以 | 网页抓取接口（JSON 请求体，支持自定义请求头与出站 POST）。 |
 | `POST` | `/v1/compat/tavily/search` | 可以 | Tavily-like 兼容搜索接口。 |
 | `POST` | `/v1/compat/serper/search` | 可以 | Serper-like 兼容搜索接口。 |
 | `POST` | `/v1/compat/openai/responses-search` | 可以 | OpenAI-like 兼容搜索接口。 |

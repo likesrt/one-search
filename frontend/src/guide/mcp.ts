@@ -1,8 +1,9 @@
 /**
  * 章节：MCP 配置
  *
- * 覆盖范围：MCP 开关与路径、传输形态与鉴权范围、JSON-RPC 方法表、`search` 工具 schema、
- * `GET` 元信息、批量与通知语义、错误码，以及 Codex / mcpServers 形态客户端 / LobeHub 的配置与排错。
+ * 覆盖范围：MCP 开关与路径、传输形态与鉴权范围、JSON-RPC 方法表、`search` 与 `fetch` 工具的
+ * schema、`GET` 元信息、批量与通知语义、错误码，以及 Codex / mcpServers 形态客户端 /
+ * LobeHub 的配置与排错。
  *
  * 代码依据：
  * - `backend/internal/api/mcp.go`（路由挂载、方法分发、工具 schema、错误码、202/405 分支）
@@ -101,8 +102,8 @@ export const mcpChapter: DocChapter = {
           rows: [
             ['`initialize`', '否', '协议版本、`capabilities`（tools/resources/prompts，`listChanged` 均为 false）、`serverInfo`（`one-search-relay` / `One Search Relay` / `0.1.0`）与一段 `instructions`'],
             ['`ping`', '否', '空对象 `{}`'],
-            ['`tools/list`', '否', '`{ tools: [ search ] }`，即下方 schema'],
-            ['`tools/call`', '**是**', '工具结果对象，见下一节'],
+            ['`tools/list`', '否', '`{ tools: [ search, fetch ] }`；抓取功能在管理台关闭时只有 `search`'],
+            ['`tools/call`', '**是**', '工具结果对象。按 `params.name` 分发到 `search` 或 `fetch`，见后续小节'],
             ['`resources/list`', '否', '`{ resources: [] }`'],
             ['`resources/templates/list`', '否', '`{ resourceTemplates: [] }`'],
             ['`prompts/list`', '否', '`{ prompts: [] }`'],
@@ -192,6 +193,63 @@ export const mcpChapter: DocChapter = {
       ]
     },
     {
+      id: 'mcp-fetch-tool',
+      title: 'fetch 工具',
+      blocks: [
+        {
+          type: 'paragraph',
+          text: '第二个工具叫 `fetch`，抓取指定 URL 并把内容整理成文本：HTML 转紧凑 Markdown，JSON 压掉多余空白，最后按字符数截断。它不经过搜索编排（不带渠道、不写搜索日志、不计入搜索用量），但**共用同一套令牌鉴权**，因此令牌的 RPM、日/月额度与状态同样生效。'
+        },
+        {
+          type: 'table',
+          columns: ['入参', '类型', '约束'],
+          rows: [
+            ['`url`', 'string', '**必填**。必须带 `http://` 或 `https://`；裸域名被拒绝'],
+            ['`method`', 'string', '`GET`（默认）或 `POST`'],
+            ['`headers`', 'object', '自定义请求头，同名覆盖默认 UA'],
+            ['`body`', 'string 或 JSON 值', '仅 `method=POST` 可用；对象/数组自动序列化为 JSON'],
+            ['`max_length`', 'integer', '默认 5000，范围 1–50000，按 Unicode 码点计'],
+            ['`start_index`', 'integer', '续读起点，仅 `method=GET` 可用'],
+            ['`raw`', 'boolean', '为 `true` 时跳过转换，返回原始文本']
+          ]
+        },
+        {
+          type: 'code',
+          lang: 'json',
+          title: 'tools/call 请求',
+          content: `{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "tools/call",
+  "params": {
+    "name": "fetch",
+    "arguments": {
+      "url": "https://example.com",
+      "max_length": 2000
+    }
+  }
+}`
+        },
+        { type: 'heading', text: '结果与开关', level: 4 },
+        {
+          type: 'list',
+          items: [
+            '成功时返回 `content`（一个 `text` 块，内容是抓取到的文本）与 `isError: false`；**没有** `structuredContent`，因为内容本身就是纯文本。',
+            '抓到上游 4xx/5xx 页面仍算调用成功：文本以 `HTTP <状态码>` 开头，随后是响应体。判断成败要看状态码，不能只看 `isError`。',
+            '参数非法、传输层失败（连不上/超时/被 SSRF 防护拦截）都返回 `{ content: [text], isError: true }`，文本即原因。',
+            '抓取功能在管理台「网页抓取」页关闭时，`tools/list` 不再列出 `fetch`，直接发 `tools/call{name:"fetch"}` 也会被拒绝——工具清单不是调用授权，「隐藏」与「拒绝」用的是同一判定。',
+            '代理是管理员级全局配置，**不是**工具参数：`inputSchema` 里没有 `proxy` 字段，传了也不会生效。'
+          ]
+        },
+        {
+          type: 'callout',
+          tone: 'info',
+          title: '别和 `fetch failed` 混淆',
+          text: '下文的排错清单里有一类 `fetch failed` 报错，那是客户端（浏览器或 Node）连不上 MCP 端点时的原生网络错误，与这里讲的 `fetch` 工具无关。两者的排错方向完全不同：工具问题看「网页抓取」章节，连接问题看下方排错清单。'
+        }
+      ]
+    },
+    {
       id: 'mcp-clients',
       title: '客户端配置',
       blocks: [
@@ -212,7 +270,7 @@ bearer_token_env_var = "ONE_SEARCH_API_TOKEN"
 enabled = true
 startup_timeout_sec = 10
 tool_timeout_sec = 60
-enabled_tools = ["search"]`
+enabled_tools = ["search", "fetch"]`
         },
         {
           type: 'code',
@@ -229,7 +287,7 @@ tool_timeout_sec = 60`
           items: [
             'Codex 用 TOML 的 `[mcp_servers.<名字>]` 表，不是 JSON 的 `mcpServers`；两者混用会导致「配置了但看不到服务」。',
             '`tool_timeout_sec` 建议大于「系统设置 → 请求超时」，否则客户端先超时而服务端仍在跑。',
-            '修改后重启 Codex，在 TUI 里输入 `/mcp` 应能看到 `one_search` 与 `search` 工具。'
+            '修改后重启 Codex，在 TUI 里输入 `/mcp` 应能看到 `one_search` 与 `search`、`fetch` 两个工具（抓取功能关闭时只有 `search`）。'
           ]
         },
         { type: 'heading', text: 'mcpServers 形态的客户端（Claude Desktop / Cursor 等）', level: 4 },
@@ -302,7 +360,7 @@ tool_timeout_sec = 60`
           content: `export BASE_URL=http://localhost:5173
 export API_TOKEN=osr_xxx
 
-# 1. 元信息（应 200 且 tools 含 search）
+# 1. 元信息（应 200 且 tools 含 search；抓取启用时另含 fetch）
 curl -i "$BASE_URL/mcp"
 
 # 2. 初始化（免鉴权）

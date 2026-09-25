@@ -1,6 +1,6 @@
 # MCP 接口文档
 
-One Search Relay 支持可选 MCP Streamable HTTP / HTTP JSON-RPC 接口，用于让 MCP 客户端通过统一的 `search` 工具调用已配置的搜索 Provider。
+One Search Relay 支持可选 MCP Streamable HTTP / HTTP JSON-RPC 接口，用于让 MCP 客户端通过 `search`（搜索）与 `fetch`（抓取网页）两个工具完成任务。
 
 ## 1. 是否已经内置 MCP
 
@@ -77,8 +77,8 @@ Authorization: Bearer oak_xxx
 | --- | --- |
 | `initialize` | 返回协议版本、服务信息和能力。 |
 | `ping` | 健康探测，返回空对象。 |
-| `tools/list` | 返回可用工具列表。 |
-| `tools/call` | 调用工具。当前支持 `search`。 |
+| `tools/list` | 返回可用工具列表（`search`，抓取功能启用时另含 `fetch`）。 |
+| `tools/call` | 调用工具。支持 `search` 与 `fetch`。 |
 | `resources/list` | 返回空资源列表。 |
 | `prompts/list` | 返回空提示词列表。 |
 
@@ -107,7 +107,55 @@ Authorization: Bearer oak_xxx
 - `structuredContent`：结构化搜索响应，格式与 `/v1/search` 的 `SearchResponse` 一致。
 - `isError`：工具执行是否失败。
 
-## 6. 调用示例
+## 6. 工具：`fetch`
+
+`fetch` 抓取指定 URL，把 HTML 转成紧凑 Markdown（JSON 响应则压缩多余空白），
+输出按字符数截断，并可用 `start_index` 续读。它不经过搜索编排：渠道、缓存、搜索日志
+与用量统计都与它无关，但**共用同一套令牌鉴权**，因此 `osr_` Token 的
+`allowed_providers` 之外的 RPM、日/月额度限制同样生效（`allowed_providers` 本身不影响抓取）。
+
+抓取是**本功能自有的全局配置**（管理台「网页抓取」页）：开关、代理地址、是否放行内网目标、
+超时。**不接受请求级代理参数** —— 允许客户端指定任意代理等于把服务变成内网跳板。
+
+输入参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `url` | string | 是 | 目标地址，必须带 `http://` 或 `https://`。裸域名（`example.com`）会被拒绝，不做 scheme 静默补全。 |
+| `method` | string | 否 | `GET`（默认）或 `POST`。仅这两种：抓取工具的定位是读取，不需要 `PUT`/`PATCH`/`DELETE`。 |
+| `headers` | object | 否 | 自定义请求头，同名覆盖默认值，因此可以替换默认 User-Agent。 |
+| `body` | string 或 JSON 值 | 否 | 仅 `method=POST` 可用。对象/数组会自动序列化为 JSON；一律以 UTF-8 发送，未声明 Content-Type 时补 `application/json`。 |
+| `max_length` | number | 否 | 返回内容的最大字符数（按 Unicode 码点计），默认 5000，范围 1–50000。 |
+| `start_index` | number | 否 | 续读起点，取自上一次结果末尾的提示。仅 `method=GET` 可用。 |
+| `raw` | boolean | 否 | 为 `true` 时跳过 Markdown 转换与 JSON 压缩，返回原始文本。 |
+
+返回结果：
+
+- `content`：单条文本内容。抓到非 2xx 页面时文本以 `HTTP <状态码>` 开头，随后是响应体。
+- `isError`：传输层失败（连不上、超时、DNS 失败、被 SSRF 防护拦截）、参数非法、
+  以及抓取功能被禁用时为 `true`，文本即原因说明。
+- 抓取工具**不返回 `structuredContent`**（与 `search` 不同）：内容本身就是纯文本，
+  包装成结构化字段没有额外信息。
+
+### 6.1 fetch 与浏览器 `fetch failed` 不是一回事
+
+工具名叫 `fetch`，文档里也常见原生 `fetch failed` 这类网络报错文案，两者无关：
+
+- **工具 `fetch`**：本服务提供的一个 MCP 工具，抓取你指定的网页。
+- **`fetch failed`**：MCP 客户端（如 LobeHub）用浏览器/Node 的 `fetch` 连不上 MCP 端点时的报错，
+  属于客户端到服务端的连接问题，见 10.2 的排错清单。
+
+### 6.2 能力边界
+
+- **不执行 JavaScript**：纯客户端渲染（CSR）的 SPA 抓回来是空内容，被 Cloudflare 等主动
+  质询页拦截的站点只会拿到质询页本身。结果为空不是报错，先用 `raw=true` 看服务实际收到了什么。
+- **不保持会话**：不保存 Cookie，需要完成登录流程的页面无法访问。显式通过 `headers`
+  传凭据可用。
+- **不解析 `robots.txt`**：合规由调用方自行保证。
+- **不写搜索日志**：抓取不会出现在「请求日志」页（那是搜索形状的日志表），
+  只在服务端访问日志里留下 `fetch_done` / `fetch_failed` 记录。
+
+## 7. 调用示例
 
 以下示例假设：
 
@@ -116,7 +164,7 @@ export BASE_URL=http://localhost:5173
 export API_TOKEN=osr_xxx
 ```
 
-### 6.1 查看 MCP 元信息
+### 7.1 查看 MCP 元信息
 
 ```bash
 curl "$BASE_URL/mcp"
@@ -130,12 +178,12 @@ curl "$BASE_URL/mcp"
   "enabled": true,
   "endpoint": "/mcp",
   "protocol_version": "2025-03-26",
-  "tools": ["search"],
+  "tools": ["search", "fetch"],
   "transport": "http-json-rpc"
 }
 ```
 
-### 6.2 初始化
+### 7.2 初始化
 
 ```bash
 curl -X POST "$BASE_URL/mcp" \
@@ -153,7 +201,7 @@ curl -X POST "$BASE_URL/mcp" \
   }'
 ```
 
-### 6.3 查看工具列表
+### 7.3 查看工具列表
 
 ```bash
 curl -X POST "$BASE_URL/mcp" \
@@ -166,7 +214,7 @@ curl -X POST "$BASE_URL/mcp" \
   }'
 ```
 
-### 6.4 调用搜索工具
+### 7.4 调用搜索工具
 
 ```bash
 curl -X POST "$BASE_URL/mcp" \
@@ -189,7 +237,7 @@ curl -X POST "$BASE_URL/mcp" \
   }'
 ```
 
-### 6.5 使用管理员 API Key 调用
+### 7.5 使用管理员 API Key 调用
 
 ```bash
 curl -X POST "$BASE_URL/mcp" \
@@ -210,7 +258,32 @@ curl -X POST "$BASE_URL/mcp" \
   }'
 ```
 
-## 7. 错误格式
+### 7.6 调用抓取工具
+
+```bash
+curl -X POST "$BASE_URL/mcp" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 5,
+    "method": "tools/call",
+    "params": {
+      "name": "fetch",
+      "arguments": {
+        "url": "https://example.com",
+        "max_length": 2000
+      }
+    }
+  }'
+```
+
+抓取功能在管理台「网页抓取」页关闭时，`fetch` 不会出现在 `tools/list` 里；
+此时直接发 `tools/call{name:"fetch"}` 也会被拒绝，返回工具结果
+`isError: true` 与「抓取功能已禁用」说明。这里刻意用工具结果而不是 JSON-RPC 错误：
+前者表示「配置状态、可恢复」，与「未知工具名」这类协议层错误区分开。
+
+## 8. 错误格式
 
 MCP 接口使用 JSON-RPC 错误格式：
 
@@ -249,7 +322,10 @@ MCP 接口使用 JSON-RPC 错误格式：
 }
 ```
 
-## 8. 在 Codex 中配置 MCP
+`fetch` 的参数错误、传输层失败与「功能已禁用」同样走这种工具结果形式，理由同上：
+让模型读到具体原因后自行修正，而不是把 JSON-RPC 错误直接抛给用户。
+
+## 9. 在 Codex 中配置 MCP
 
 Codex CLI / Codex IDE 扩展共用 `config.toml`。常见位置：
 
@@ -258,7 +334,7 @@ Codex CLI / Codex IDE 扩展共用 `config.toml`。常见位置：
 
 Codex 对 MCP 服务使用 TOML 表：`[mcp_servers.<server-name>]`。One Search Relay 是远程 HTTP MCP 服务，因此推荐直接编辑 `config.toml`，而不是使用主要面向 stdio 服务的 `codex mcp add -- <command>` 形式。
 
-### 8.1 推荐配置：用环境变量保存 Token
+### 9.1 推荐配置：用环境变量保存 Token
 
 先在 shell 中设置 Token：
 
@@ -278,8 +354,8 @@ enabled = true
 startup_timeout_sec = 10
 tool_timeout_sec = 60
 
-# 可选：只暴露 search 工具
-enabled_tools = ["search"]
+# 可选：只暴露需要的工具；抓取功能关闭时列表里只有 search
+enabled_tools = ["search", "fetch"]
 ```
 
 说明：
@@ -289,7 +365,7 @@ enabled_tools = ["search"]
 - `tool_timeout_sec` 建议大于后端 `request_timeout_ms`，否则 Codex 可能先超时。
 - 普通 `osr_` Token 会受 `allowed_providers`、RPM、日/月额度限制；`oak_` 管理员 API Key 拥有完整权限。
 
-### 8.2 直接写请求头的配置
+### 9.2 直接写请求头的配置
 
 如果只是本机临时测试，也可以直接写 HTTP Header：
 
@@ -299,12 +375,12 @@ url = "http://localhost:5173/mcp"
 http_headers = { "Authorization" = "Bearer osr_xxx" }
 enabled = true
 tool_timeout_sec = 60
-enabled_tools = ["search"]
+enabled_tools = ["search", "fetch"]
 ```
 
 不建议把这种配置提交到项目仓库，因为会泄露 Token。
 
-### 8.3 使用 `X-API-Key` 请求头
+### 9.3 使用 `X-API-Key` 请求头
 
 如果你的环境更偏向 API Key Header，也可以这样配置：
 
@@ -316,7 +392,7 @@ enabled = true
 tool_timeout_sec = 60
 ```
 
-### 8.4 在 Codex 中检查是否生效
+### 9.4 在 Codex 中检查是否生效
 
 启动 Codex：
 
@@ -330,7 +406,7 @@ codex
 /mcp
 ```
 
-应能看到 `one_search` MCP 服务和 `search` 工具。随后可以在对话中让 Codex 使用该工具，例如：
+应能看到 `one_search` MCP 服务和 `search`、`fetch` 两个工具。随后可以在对话中让 Codex 使用该工具，例如：
 
 ```text
 使用 one_search 的 search 工具搜索 “latest web search APIs”，返回 5 条结果。
@@ -344,7 +420,7 @@ codex
 4. 确认 `~/.codex/config.toml` 使用的是 `[mcp_servers.one_search]`，不是 Claude Desktop 风格的 `mcpServers`。
 5. 重新启动 Codex。
 
-### 8.5 项目级配置示例
+### 9.5 项目级配置示例
 
 如果希望这个仓库自带 Codex MCP 配置模板，可以新建 `.codex/config.toml`：
 
@@ -354,12 +430,12 @@ url = "http://localhost:5173/mcp"
 bearer_token_env_var = "ONE_SEARCH_API_TOKEN"
 enabled = true
 tool_timeout_sec = 60
-enabled_tools = ["search"]
+enabled_tools = ["search", "fetch"]
 ```
 
 项目级配置只引用环境变量，不要写入真实 `osr_` 或 `oak_` Token。
 
-## 9. 在 LobeHub / LobeChat 中配置 MCP
+## 10. 在 LobeHub / LobeChat 中配置 MCP
 
 LobeHub 的自定义 MCP 支持 Streamable HTTP。配置时建议这样填：
 
@@ -387,7 +463,7 @@ LobeHub 的自定义 MCP 支持 Streamable HTTP。配置时建议这样填：
 }
 ```
 
-### 9.1 LobeHub 中最容易踩的地址问题
+### 10.1 LobeHub 中最容易踩的地址问题
 
 LobeHub 获取 Manifest 时，通常不是浏览器直接访问 MCP，而是由 LobeHub 后端、Electron 主进程或容器里的服务端去访问你的 MCP 地址。因此：
 
@@ -407,7 +483,7 @@ LobeHub 获取 Manifest 时，通常不是浏览器直接访问 MCP，而是由 
 /v1/mcp/
 ```
 
-### 9.2 排查 “获取 Manifest 失败 / Error POSTing to endpoint”
+### 10.2 排查 “获取 Manifest 失败 / Error POSTing to endpoint”
 
 先在 **运行 LobeHub 的同一台机器或同一个容器网络内** 测试，而不是只在浏览器所在机器测试。
 
@@ -430,7 +506,7 @@ docker compose up -d --build
 curl -i http://localhost:5173/mcp
 ```
 
-应返回 `200` 和包含 `tools:["search"]` 的 JSON。
+应返回 `200` 和包含 `tools:["search","fetch"]` 的 JSON（抓取功能关闭时只有 `search`）。
 
 3. 用 Streamable HTTP 客户端常用请求头测试初始化：
 
@@ -483,7 +559,7 @@ curl -i -X POST "$BASE_URL/mcp" \
   }'
 ```
 
-应返回 `search` 工具。
+应返回 `search` 与 `fetch` 工具（抓取功能关闭时只有 `search`）。
 
 6. 如果返回 `401`：
 
@@ -502,7 +578,7 @@ curl -i -X POST "$BASE_URL/mcp" \
 - 基本是 LobeHub 运行环境无法连到该 URL。
 - 把 `localhost` 换成 LobeHub 容器/服务器能访问到的 IP、服务名或公网域名。
 
-## 10. 其它客户端配置示例
+## 11. 其它客户端配置示例
 
 不同 MCP 客户端对远程 HTTP MCP 的配置字段略有差异，通用要点是：
 

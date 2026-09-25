@@ -44,7 +44,7 @@ Content-Type: application/json`
         },
         {
           type: 'paragraph',
-          text: '同一前缀下还有两个只读端点，都需要同样的令牌：`GET /v1/providers` 返回渠道配置列表，`GET /v1/usage/summary` 返回累计用量摘要。'
+          text: '同一前缀下还有三个只读端点，都需要同样的令牌：`GET /v1/providers` 返回渠道配置列表，`GET /v1/usage/summary` 返回累计用量摘要，`GET /v1/fetch` 抓取并读取一个网页（详见「网页抓取」章节）——抓取与搜索链路独立，不走渠道编排，也不写搜索日志。'
         }
       ]
     },

@@ -12,6 +12,7 @@ import type { DocChapter } from './types'
 import { quickstartChapter } from './quickstart'
 import { consoleChapter } from './console'
 import { searchApiChapter } from './search-api'
+import { fetchChapter } from './fetch'
 import { compatApiChapter } from './compat-api'
 import { mcpChapter } from './mcp'
 import { providersChapter } from './providers'
@@ -24,6 +25,7 @@ export const chapters: DocChapter[] = [
   quickstartChapter,
   consoleChapter,
   searchApiChapter,
+  fetchChapter,
   compatApiChapter,
   mcpChapter,
   providersChapter,

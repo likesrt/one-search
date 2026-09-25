@@ -1,16 +1,17 @@
 /**
  * 章节：管理台使用
  *
- * 覆盖范围：逐页说明管理台 7 个页面——搜索调试、仪表盘、平台管理、接口令牌、
+ * 覆盖范围：逐页说明管理台 8 个页面——搜索调试、网页抓取、仪表盘、平台管理、接口令牌、
  * 请求日志、审计日志、系统设置：每个控件的作用、各指标的口径、以及容易误读的地方。
  *
  * 代码依据：
  * - `frontend/src/views/PlaygroundView.vue`（筛选胶囊、统计胶囊、渠道调用面板）
+ * - `frontend/src/views/FetchView.vue`（抓取调试、续读、专属配置）
  * - `frontend/src/views/DashboardView.vue`（5 档时间范围、6 个 KPI、健康分档、成本估算、日志回填）
  * - `frontend/src/views/ProvidersView.vue`、`TokensView.vue`（表单字段与按钮文案）
  * - `frontend/src/views/LogsView.vue`、`AuditLogsView.vue`（自动刷新、抽屉、风险分级）
  * - `frontend/src/views/SettingsView.vue`（5 个分区与字段）
- * - `backend/internal/db/store.go`（RuntimeSettings 与 ProviderHealth 默认值/阈值）
+ * - `backend/internal/db/store.go`（RuntimeSettings / FetchSettings 与 ProviderHealth 默认值/阈值）
  */
 
 import type { DocChapter } from './types'
@@ -82,6 +83,58 @@ export const consoleChapter: DocChapter = {
           tone: 'warn',
           title: '这一页只覆盖最小参数集',
           text: '搜索调试页只会发送 `query`、`mode`、`providers`、`limit` 四个字段，`cache` 恒为默认策略；页面上没有 `freshness`、`dedupe`、`rerank`、`include_raw`、`options` 的输入控件。要验证这些字段请直接调 `/v1/search`。'
+        }
+      ]
+    },
+    {
+      id: 'console-fetch',
+      title: '网页抓取',
+      blocks: [
+        {
+          type: 'paragraph',
+          text: '定位是「把某个 URL 的正文抓回来看一眼」，并顺带配置这项功能本身。页面分两段：上方是抓取调试，下方是专属配置。它调用管理端接口 `POST /api/admin/fetch/test`，与对外 `POST /v1/fetch` 走同一套校验与执行逻辑，因此这里试出来的行为就是对外的行为。'
+        },
+        { type: 'heading', text: '抓取调试', level: 4 },
+        {
+          type: 'list',
+          items: [
+            'URL 输入框回车或点「抓取」都会发起请求；URL 必须带 `http://` 或 `https://`，裸域名会在前端就被拦下并提示（与后端规则一致）。',
+            '参数胶囊：长度（`max_length`，1–50000，默认 5000）、方法（GET/POST）、原始内容（`raw`）、起点（`start_index`）。',
+            '「起点」只在方法为 GET 时出现：续读会重放请求，而 POST 可能创建资源或二次计费，服务端也会拒绝带 `start_index` 的 POST。',
+            '方法切到 POST 后额外出现请求头与请求体两个输入框。请求头需填 JSON 对象（空着表示不传），请求体能被解析为 JSON 就按 JSON 值发送，否则按原始字符串发送。',
+            '「重置参数」只复位参数，不清空 URL——便于改了参数后重抓同一个地址。'
+          ]
+        },
+        { type: 'heading', text: '结果区', level: 4 },
+        {
+          type: 'list',
+          items: [
+            '标题栏显示上游状态码、`Content-Type` 与总字符数。**状态码是上游的**：抓到 404 页面同样显示结果而不是错误，因为自定义 API 常把错误详情放在响应体里。',
+            '内容按 Markdown 渲染在深色代码块里。被截断时出现黄色胶囊「已截断 · 下一段从 N 开始」，并给出「续读」按钮（自动把起点设为 N 后重抓）。',
+            '「续读」在方法为 POST 时会被拦下并提示提高长度后重抓。',
+            '传输层失败（连不上、超时、被 SSRF 防护拦截）显示为红色横幅，文案即服务端返回的原因。'
+          ]
+        },
+        { type: 'heading', text: '专属配置', level: 4 },
+        {
+          type: 'paragraph',
+          text: '这四项存在独立于「系统设置」的配置里，保存后对新请求立即生效：'
+        },
+        {
+          type: 'table',
+          columns: ['字段', '默认', '要点'],
+          rows: [
+            ['启用网页抓取', '开', '关闭后 `/v1/fetch` 返回 404，MCP 的工具清单也不再列出 `fetch`'],
+            ['抓取超时 (ms)', '30000', '上界 60000，受反向代理 65s 读取超时约束；配得更长只会先被反代断开'],
+            ['抓取代理', '空', '空 = 直连。容器部署时 `127.0.0.1` / `localhost` 会被自动改写为 `host.docker.internal`'],
+            ['放行内网目标', '关', '打开后任何持令牌的调用方都能借本服务探测内网，页面会给出警告条']
+          ]
+        },
+        {
+          type: 'callout',
+          tone: 'info',
+          title: '这里的改动会写审计',
+          text: '保存配置写一条 `fetch.settings.update`，试抓成功或失败都写一条 `fetch.test`（内含状态码与是否截断）。而对外 `/v1/fetch` 的调用不写审计，与对外搜索保持一致，只在服务端访问日志里留下 `fetch_done` / `fetch_failed` 记录。'
         }
       ]
     },
