@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/one-search/one-search/backend/internal/fetch"
 	"github.com/one-search/one-search/backend/internal/model"
 )
 
@@ -74,8 +75,36 @@ func (h *Handler) mcpInfo(w http.ResponseWriter, r *http.Request) {
 		"supported_protocol_versions": mcpSupportedProtocolVersions,
 		"endpoint":                    r.URL.Path,
 		"auth":                        "Authorization: Bearer <osr_...|oak_...> or X-API-Key",
-		"tools":                       []string{"search"},
+		"tools":                       h.mcpToolNames(),
 	})
+}
+
+// mcpToolNames 返回当前对外暴露的工具名清单。
+//
+// 与 tools/list 共用同一份判定，避免两处不一致：禁用抓取后元信息仍列出 fetch 会让
+// 自检脚本误判服务状态（`curl /mcp` 是最常用的连通性检查）。
+//
+// 返回值：工具名切片，search 恒在，fetch 仅在功能启用时追加。
+// 副作用：无（只读内存标志，不查库）。
+func (h *Handler) mcpToolNames() []string {
+	names := []string{"search"}
+	if h.isFetchEnabled() {
+		names = append(names, fetch.ToolName)
+	}
+	return names
+}
+
+// mcpToolSchemas 返回 tools/list 的完整工具定义清单。
+//
+// 顺序与 mcpToolNames 一致：search 在前、fetch 在后，元信息与清单可逐一对应。
+// 边界条件：功能禁用时返回单元素切片（仅 search），而非 nil，
+// 让 JSON 输出始终是数组，客户端无需处理 null。
+func (h *Handler) mcpToolSchemas() []interface{} {
+	schemas := []interface{}{mcpSearchToolSchema()}
+	if h.isFetchEnabled() {
+		schemas = append(schemas, fetch.ToolSchema())
+	}
+	return schemas
 }
 
 func (h *Handler) mcpDelete(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +199,7 @@ func (h *Handler) handleMCPRequest(r *http.Request, req mcpRequest) (mcpResponse
 	case "ping":
 		return newMCPResult(req.ID, map[string]interface{}{}), true
 	case "tools/list":
-		return newMCPResult(req.ID, map[string]interface{}{"tools": []interface{}{mcpSearchToolSchema()}}), true
+		return newMCPResult(req.ID, map[string]interface{}{"tools": h.mcpToolSchemas()}), true
 	case "tools/call":
 		result, errResp := h.handleMCPToolCall(r, req)
 		if errResp != nil {
@@ -195,6 +224,14 @@ func (h *Handler) handleMCPNotification(r *http.Request, req mcpRequest) {
 	_ = req
 }
 
+// handleMCPToolCall 解析 tools/call 的参数并按工具名分发。
+//
+// 参数解析失败与「工具名未知」都走 JSON-RPC 错误（-32602），因为二者都属于协议层问题；
+// 工具自身的执行失败则以工具结果的 isError 表达（见 mcpCallSearch / mcpCallFetch），
+// 便于模型读到具体原因并自行修正参数。
+//
+// 边界条件：params 缺失或非法返回 -32602。fetch 被禁用时**不**按「未知工具」处理，
+// 而是走 mcpCallFetch 返回说明配置状态的工具结果 —— 让「隐藏」与「拒绝」共用同一判定。
 func (h *Handler) handleMCPToolCall(r *http.Request, req mcpRequest) (interface{}, *mcpResponse) {
 	var params struct {
 		Name      string          `json:"name"`
@@ -206,13 +243,32 @@ func (h *Handler) handleMCPToolCall(r *http.Request, req mcpRequest) (interface{
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return nil, mcpInvalidParams(req.ID, "invalid params")
 	}
-	if params.Name != "search" {
+	switch params.Name {
+	case "search":
+		return h.mcpCallSearch(r, req, params.Arguments)
+	case fetch.ToolName:
+		return h.mcpCallFetch(r, params.Arguments)
+	default:
 		return nil, mcpInvalidParams(req.ID, "unknown tool: "+params.Name)
 	}
+}
 
+// mcpCallSearch 执行 MCP 的 search 工具调用。
+//
+// 参数：
+//   - r：原始 HTTP 请求，用于取 context 中的令牌身份与 request id。
+//   - req：JSON-RPC 请求，失败时用其 id 组装错误响应。
+//   - arguments：工具参数的原始 JSON，可为空（此时按缺少 query 处理）。
+//
+// 返回值：成功时为工具结果（含文本与 structuredContent），失败时为 JSON-RPC 错误响应；
+// 搜索链路自身的错误改为工具结果的 isError，让模型能看到原因。
+//
+// 边界条件：查询词为空返回 -32602；令牌限定了允许渠道但请求越权时返回 -32003。
+// 副作用：发起真实搜索（含缓存读写与日志落库，见 Orchestrator）。
+func (h *Handler) mcpCallSearch(r *http.Request, req mcpRequest, arguments json.RawMessage) (interface{}, *mcpResponse) {
 	var searchReq model.SearchRequest
-	if len(params.Arguments) > 0 {
-		if err := json.Unmarshal(params.Arguments, &searchReq); err != nil {
+	if len(arguments) > 0 {
+		if err := json.Unmarshal(arguments, &searchReq); err != nil {
 			return nil, mcpInvalidParams(req.ID, "invalid search arguments")
 		}
 	}
@@ -220,8 +276,8 @@ func (h *Handler) handleMCPToolCall(r *http.Request, req mcpRequest) (interface{
 	if searchReq.Query == "" {
 		return nil, mcpInvalidParams(req.ID, "query is required")
 	}
-	searchReq.LimitExplicit = hasJSONField(params.Arguments, "limit")
-	searchReq.ProvidersExplicit = hasJSONField(params.Arguments, "providers")
+	searchReq.LimitExplicit = hasJSONField(arguments, "limit")
+	searchReq.ProvidersExplicit = hasJSONField(arguments, "providers")
 	searchReq.CompatFormat = model.CompatFormatNative
 	if searchReq.Options == nil {
 		searchReq.Options = map[string]interface{}{}
@@ -249,6 +305,42 @@ func (h *Handler) handleMCPToolCall(r *http.Request, req mcpRequest) (interface{
 		"structuredContent": response,
 		"isError":           false,
 	}, nil
+}
+
+// mcpCallFetch 执行 MCP 的 fetch 工具调用。
+//
+// 入口即强制校验功能开关：工具清单不是调用授权，即使某客户端缓存了旧的 tools/list、
+// 或绕过清单直接发 tools/call{name:"fetch"}，禁用时也必须拒绝。拒绝用工具结果的
+// isError 而不是 JSON-RPC 错误 —— 前者是「配置状态、可恢复」，后者是协议层错误，
+// 两者对模型的含义不同。
+//
+// 参数与返回值语义同 mcpCallSearch，但参数非法也走工具结果的 isError（而非 -32602）：
+// 抓取参数里的 url 常来自模型自行拼装，用 isError 把原因原样回传比协议错误更易自纠。
+//
+// 副作用：发起真实网络请求；读取一次抓取配置（用于构建/复用 Fetcher）。
+func (h *Handler) mcpCallFetch(r *http.Request, arguments json.RawMessage) (interface{}, *mcpResponse) {
+	if !h.isFetchEnabled() {
+		return mcpToolError("抓取功能已禁用（可在管理台「网页抓取」页开启）"), nil
+	}
+	args := map[string]any{}
+	if len(arguments) > 0 {
+		if err := json.Unmarshal(arguments, &args); err != nil {
+			return mcpToolError("invalid fetch arguments"), nil
+		}
+	}
+	settings, err := h.fetchSettings(r.Context())
+	if err != nil {
+		return mcpToolError(err.Error()), nil
+	}
+	request, err := fetch.ParseRequest(args)
+	if err != nil {
+		return mcpToolError(err.Error()), nil
+	}
+	result, err := h.fetcherFor(settings).Fetch(r.Context(), request)
+	if err != nil {
+		return mcpToolError(err.Error()), nil
+	}
+	return mcpToolResult(result.Text()), nil
 }
 
 func (h *Handler) mcpRequestsRequireAuth(requests []mcpRequest) bool {
@@ -309,8 +401,9 @@ func (h *Handler) mcpAuthContext(r *http.Request) (context.Context, int, string,
 // serverInfo 与 instructions。
 //
 // 边界条件：params 为空、解析失败或 protocolVersion 不受支持时，版本协商回退为默认版本。
-// instructions 是模型理解本服务用途的主要入口，措辞必须明确指向「实时联网网页搜索」，
-// 否则模型易将其误判为本地知识库或内部检索而回避调用。
+// instructions 是模型理解本服务用途的主要入口，措辞必须明确指向「实时联网」的两项能力：
+// 搜索与网页抓取。只写搜索会让模型在需要读某个具体页面时不知道还有 fetch 可用，
+// 从而退化为臆造内容。
 //
 // 副作用：无。
 func mcpInitializeResult(params json.RawMessage) map[string]interface{} {
@@ -326,7 +419,7 @@ func mcpInitializeResult(params json.RawMessage) map[string]interface{} {
 			"title":   "One Search Relay",
 			"version": "0.1.0",
 		},
-		"instructions": "Use the search tool to run live web searches on the public internet and get ranked results with titles, URLs and snippets. Call it whenever the user asks about recent events, current or up-to-date facts, or anything that requires information from the web.",
+		"instructions": "Use the search tool to run live web searches on the public internet and get ranked results with titles, URLs and snippets. Call it whenever the user asks about recent events, current or up-to-date facts, or anything that requires information from the web. Use the fetch tool to read a specific URL — a page the user linked or a result returned by search — and get its content as compact Markdown; it fetches the page over plain HTTP and does not run JavaScript, so client-rendered pages come back empty.",
 	}
 }
 
@@ -417,10 +510,25 @@ func mcpSearchToolSchema() map[string]interface{} {
 	}
 }
 
+// mcpToolError 构造失败的工具结果。
+//
+// 用 isError 而非 JSON-RPC 错误表达执行失败：模型能读到具体原因并自行修正参数重试，
+// 而协议层错误通常会被客户端直接抛给用户。
 func mcpToolError(message string) map[string]interface{} {
 	return map[string]interface{}{
 		"content": []mcpContent{{Type: "text", Text: message}},
 		"isError": true,
+	}
+}
+
+// mcpToolResult 构造成功的工具结果（单条 text 内容）。
+//
+// 与 mcpToolError 成对使用，保证成功与失败两条路径的结果结构一致
+// （都只含 content 与 isError），客户端无需按错误与否分别解析。
+func mcpToolResult(text string) map[string]interface{} {
+	return map[string]interface{}{
+		"content": []mcpContent{{Type: "text", Text: text}},
+		"isError": false,
 	}
 }
 
