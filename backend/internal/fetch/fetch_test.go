@@ -29,8 +29,11 @@ func mustParseRequest(t *testing.T, args map[string]any) Request {
 	return request
 }
 
+// TestParseRequestValidation 以表驱动覆盖参数校验矩阵：
+// 每行只断言「是否报错」，错误文案的细节由其他用例与端点测试抽查。
+// 覆盖缺 url、裸域名、非 http(s)、method 非 GET/POST、max_length 越界与小数、
+// start_index 非负、body 与 method 的联动、以及 Content-Type 与 body 的联动。
 func TestParseRequestValidation(t *testing.T) {
-	// 表驱动覆盖参数校验矩阵：每行只断言「是否报错」，错误文案的细节另行抽查。
 	cases := []struct {
 		name    string
 		args    map[string]any
@@ -74,6 +77,8 @@ func TestParseRequestValidation(t *testing.T) {
 	}
 }
 
+// TestParseRequestDefaultsAndHeaderMerge 验证缺省值、对象 body 的自动序列化、
+// Content-Type 默认补齐，以及空值请求头被忽略。
 func TestParseRequestDefaultsAndHeaderMerge(t *testing.T) {
 	request := mustParseRequest(t, map[string]any{
 		"url":     "https://example.com",
@@ -99,6 +104,8 @@ func TestParseRequestDefaultsAndHeaderMerge(t *testing.T) {
 	}
 }
 
+// TestArgsFromQuery 验证查询串形态的类型转换与白名单：
+// 只接受 GET 可用字段，headers/body/proxy 不在其中；非法写法必须报错而非静默取默认值。
 func TestArgsFromQuery(t *testing.T) {
 	// 查询串形态只接受 GET 可用字段，且类型转换失败必须报错而非静默取默认值。
 	args, err := ArgsFromQuery(httptest.NewRequest(http.MethodGet,
@@ -129,6 +136,8 @@ func TestArgsFromQuery(t *testing.T) {
 	}
 }
 
+// TestBoundTextRunes 验证按 rune 截断：中文与 emoji 不被切碎，
+// next_index 与 total_length 自洽，超界时返回空提示且不再标记截断。
 func TestBoundTextRunes(t *testing.T) {
 	// 截断按 rune 计：中文与 emoji 都不能被切碎，next_index 与 total_length 必须自洽。
 	text := strings.Repeat("中", 10) + "😀abc"
@@ -167,6 +176,8 @@ func TestBoundTextRunes(t *testing.T) {
 	}
 }
 
+// TestBoundTextPostNotice 验证 POST 被截断时的提示指向 max_length 而非 start_index
+// （续读需重放请求，POST 可能造成副作用，因此不提供续读）。
 func TestBoundTextPostNotice(t *testing.T) {
 	// POST 不能续读，提示必须指向 max_length 而不是 start_index。
 	out := boundText(strings.Repeat("a", 100), Request{Method: http.MethodPost, MaxLength: 10})
@@ -179,6 +190,8 @@ func TestBoundTextPostNotice(t *testing.T) {
 	}
 }
 
+// TestFetchSuccessAndTruncation 验证抓取主流程：默认 UA 与自定义请求头透传、
+// HTML 转 Markdown、Content-Type 透出，以及截断元信息。
 func TestFetchSuccessAndTruncation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("User-Agent") == "" {
@@ -215,6 +228,8 @@ func TestFetchSuccessAndTruncation(t *testing.T) {
 	}
 }
 
+// TestFetchKeepsUpstreamErrorStatus 验证上游 4xx/5xx 仍算抓取成功：
+// 状态码透出、响应体保留，且 Text() 会补上状态码行供 MCP 文本通道使用。
 func TestFetchKeepsUpstreamErrorStatus(t *testing.T) {
 	// 上游 4xx/5xx 仍算抓取成功：状态码透出，响应体保留。
 	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError} {
@@ -245,6 +260,7 @@ func TestFetchKeepsUpstreamErrorStatus(t *testing.T) {
 	}
 }
 
+// TestFetchRawSkipsNormalization 验证 raw=true 时原样返回 HTML，不做 Markdown 转换。
 func TestFetchRawSkipsNormalization(t *testing.T) {
 	// raw=true 应原样返回 HTML，不做 Markdown 转换。
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -263,6 +279,7 @@ func TestFetchRawSkipsNormalization(t *testing.T) {
 	}
 }
 
+// TestFetchTransportFailure 验证拨号失败返回 error（REST 层据此映射 502），而不是空结果。
 func TestFetchTransportFailure(t *testing.T) {
 	// 拨号失败必须返回 error（REST 层据此映射 502），而不是空结果。
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -279,6 +296,8 @@ func TestFetchTransportFailure(t *testing.T) {
 	}
 }
 
+// TestFetchRespectsContextCancellation 验证 context 取消能中断抓取，
+// 否则客户端断开后连接会一直挂到超时。
 func TestFetchRespectsContextCancellation(t *testing.T) {
 	// context 取消必须能中断抓取，否则客户端断开后连接会一直挂到超时。
 	blocked := make(chan struct{})
@@ -299,6 +318,8 @@ func TestFetchRespectsContextCancellation(t *testing.T) {
 	}
 }
 
+// TestNewFetcherNormalizesConfig 验证 Config 的零值与越界值都被收敛为安全默认值：
+// 超时上界对齐反代 65s、非法代理按直连处理、合法代理保留。
 func TestNewFetcherNormalizesConfig(t *testing.T) {
 	// 零值与越界值都必须被收敛为安全默认值，否则会出现「无超时」这类危险配置。
 	fetcher := NewFetcher(Config{})

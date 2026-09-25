@@ -2,28 +2,99 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/one-search/one-search/backend/internal/model"
 )
 
+// mcpToolSchema 是单个 MCP 工具的响应结构，便于按名查找与断言字段。
+type mcpToolSchema struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	InputSchema map[string]interface{} `json:"inputSchema"`
+}
+
+// mcpToolsResponse 是 tools/list 的响应结构，独立成类型避免每个用例重复声明匿名结构。
+type mcpToolsResponse struct {
+	JSONRPC string `json:"jsonrpc"`
+	ID      int    `json:"id"`
+	Result  struct {
+		Tools []mcpToolSchema `json:"tools"`
+	} `json:"result"`
+}
+
+// mcpToolByName 按名查找工具。
+//
+// 现有测试曾按索引 0 取工具，加入第二个工具后该写法必然错位；
+// 工具顺序不是协议保证的一部分，断言必须按名字而不是位置。
+// 未命中返回 (零值, false)，由调用方给出具体失败信息。
+func mcpToolByName(tools []mcpToolSchema, name string) (mcpToolSchema, bool) {
+	for _, item := range tools {
+		if item.Name == name {
+			return item, true
+		}
+	}
+	return mcpToolSchema{}, false
+}
+
+// mcpTestStore 是只实现 MCP 工具调用路径所需两个方法的 AppStore 替身。
+//
+// 用「内嵌接口」而非逐条实现：AppStore 有三十多个方法，全部实现既冗长又与本次改动无关；
+// 内嵌未实现的 AppStore 接口即可满足类型要求，只要测试不触及其余方法就不会 panic。
+// 之所以需要替身：tools/call 属于需鉴权的 MCP 方法，鉴权会读 RuntimeSettings，
+// 零值 Handler 的 store 为 nil 会在那里 panic（这是既有行为，不是本次改动引入的）。
+type mcpTestStore struct {
+	AppStore
+	fetchSettings model.FetchSettings
+}
+
+// RuntimeSettings 返回关闭鉴权的配置，让 tools/call 免令牌即可进入分发逻辑。
+func (s *mcpTestStore) RuntimeSettings(context.Context) (model.RuntimeSettings, error) {
+	return model.RuntimeSettings{APIAuthRequired: false}, nil
+}
+
+// FetchSettings 返回用例设定的抓取配置，用于验证启用/禁用两条路径。
+func (s *mcpTestStore) FetchSettings(context.Context) (model.FetchSettings, error) {
+	return s.fetchSettings, nil
+}
+
+// mcpPost 向 MCP 路由发送一个 JSON-RPC 请求并返回响应记录器。
+func mcpPost(t *testing.T, r chi.Router, payload string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
+// mcpListTools 请求 tools/list 并解析结果，失败即终止用例。
+func mcpListTools(t *testing.T, r chi.Router) mcpToolsResponse {
+	t.Helper()
+	rec := mcpPost(t, r, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tools/list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp mcpToolsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode tools/list response: %v", err)
+	}
+	return resp
+}
+
 func TestMCPStreamableHTTPHandshakeAndListTools(t *testing.T) {
 	h := &Handler{}
 	r := chi.NewRouter()
 	h.mountMCP(r, "/mcp")
 
-	post := func(payload string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(payload))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/event-stream")
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
-		return rec
-	}
+	post := func(payload string) *httptest.ResponseRecorder { return mcpPost(t, r, payload) }
 
 	initRec := post(`{
 		"jsonrpc":"2.0",
@@ -70,28 +141,16 @@ func TestMCPStreamableHTTPHandshakeAndListTools(t *testing.T) {
 		t.Fatalf("initialized status = %d, body = %s", initializedRec.Code, initializedRec.Body.String())
 	}
 
-	toolsRec := post(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
-	if toolsRec.Code != http.StatusOK {
-		t.Fatalf("tools/list status = %d, body = %s", toolsRec.Code, toolsRec.Body.String())
-	}
-	var toolsResp struct {
-		JSONRPC string `json:"jsonrpc"`
-		ID      int    `json:"id"`
-		Result  struct {
-			Tools []struct {
-				Name        string                 `json:"name"`
-				Description string                 `json:"description"`
-				InputSchema map[string]interface{} `json:"inputSchema"`
-			} `json:"tools"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(toolsRec.Body.Bytes(), &toolsResp); err != nil {
-		t.Fatalf("decode tools/list response: %v", err)
-	}
+	toolsResp := mcpListTools(t, r)
+	// 零值 Handler 下 fetch 未启用，因此只列出 search；
+	// 这同时验证了「tools/list 不查库」——store 为 nil 也不会 panic。
 	if toolsResp.JSONRPC != "2.0" || toolsResp.ID != 2 || len(toolsResp.Result.Tools) != 1 {
 		t.Fatalf("unexpected tools/list response: %+v", toolsResp)
 	}
-	tool := toolsResp.Result.Tools[0]
+	tool, ok := mcpToolByName(toolsResp.Result.Tools, "search")
+	if !ok {
+		t.Fatalf("search tool missing: %+v", toolsResp.Result.Tools)
+	}
 	if tool.Name != "search" || tool.Description == "" || tool.InputSchema["type"] != "object" {
 		t.Fatalf("unexpected tool schema: %+v", tool)
 	}
@@ -115,6 +174,134 @@ func TestMCPStreamableHTTPHandshakeAndListTools(t *testing.T) {
 		if enumValues[index] != provider {
 			t.Fatalf("providers enum[%d] = %v, want %s", index, enumValues[index], provider)
 		}
+	}
+}
+
+// TestMCPToolsListIncludesFetchWhenEnabled 验证启用后清单同时含 search 与 fetch。
+func TestMCPToolsListIncludesFetchWhenEnabled(t *testing.T) {
+	h := &Handler{}
+	h.EnableFetch(true)
+	r := chi.NewRouter()
+	h.mountMCP(r, "/mcp")
+
+	resp := mcpListTools(t, r)
+	if len(resp.Result.Tools) != 2 {
+		t.Fatalf("启用时应列出 2 个工具，实际 %d: %+v", len(resp.Result.Tools), resp.Result.Tools)
+	}
+	for _, name := range []string{"search", "fetch"} {
+		if _, ok := mcpToolByName(resp.Result.Tools, name); !ok {
+			t.Fatalf("工具 %s 未出现在清单中: %+v", name, resp.Result.Tools)
+		}
+	}
+	fetchTool, _ := mcpToolByName(resp.Result.Tools, "fetch")
+	input, ok := fetchTool.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("fetch schema 缺少 properties: %+v", fetchTool.InputSchema)
+	}
+	if _, ok := input["url"]; !ok {
+		t.Fatalf("fetch schema 缺少 url 参数: %+v", input)
+	}
+	// 代理是管理员级全局配置，schema 不应暴露请求级 proxy
+	if _, ok := input["proxy"]; ok {
+		t.Fatal("fetch schema 不应暴露 proxy 参数")
+	}
+}
+
+// TestMCPFetchDisabledIsRejectedAndHidden 验证禁用时「隐藏」与「拒绝」两条路径一致：
+// 清单里没有 fetch，且直接发 tools/call 也会被拒（工具清单不是调用授权）。
+func TestMCPFetchDisabledIsRejectedAndHidden(t *testing.T) {
+	h := &Handler{store: &mcpTestStore{}}
+	r := chi.NewRouter()
+	h.mountMCP(r, "/mcp")
+
+	resp := mcpListTools(t, r)
+	if _, ok := mcpToolByName(resp.Result.Tools, "fetch"); ok {
+		t.Fatalf("禁用时不应列出 fetch: %+v", resp.Result.Tools)
+	}
+
+	callRec := mcpPost(t, r, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fetch","arguments":{"url":"https://example.com"}}}`)
+	if callRec.Code != http.StatusOK {
+		t.Fatalf("tools/call status = %d, body = %s", callRec.Code, callRec.Body.String())
+	}
+	var callResp struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(callRec.Body.Bytes(), &callResp); err != nil {
+		t.Fatalf("decode tools/call response: %v", err)
+	}
+	// 用工具结果的 isError 而非 JSON-RPC 错误：前者是「配置状态、可恢复」，与
+	// 「未知工具名」这类协议层错误区分开
+	if !callResp.Result.IsError || len(callResp.Result.Content) == 0 {
+		t.Fatalf("禁用时 tools/call 应返回 isError 工具结果: %s", callRec.Body.String())
+	}
+	if !strings.Contains(callResp.Result.Content[0].Text, "抓取功能已禁用") {
+		t.Fatalf("拒绝原因应说明功能已禁用，实际: %q", callResp.Result.Content[0].Text)
+	}
+}
+
+// TestMCPInfoToolsMatchToolsList 验证 /mcp 元信息与 tools/list 同源。
+//
+// 不同源时禁用抓取后元信息仍会列出 fetch，而 `curl /mcp` 是最常用的自检手段，
+// 会让排错方向跑偏。
+func TestMCPInfoToolsMatchToolsList(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "禁用", true: "启用"}[enabled], func(t *testing.T) {
+			h := &Handler{}
+			h.EnableFetch(enabled)
+			r := chi.NewRouter()
+			h.mountMCP(r, "/mcp")
+
+			req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET /mcp status = %d", rec.Code)
+			}
+			var info struct {
+				Tools []string `json:"tools"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+				t.Fatalf("decode info response: %v", err)
+			}
+
+			list := mcpListTools(t, r)
+			if len(info.Tools) != len(list.Result.Tools) {
+				t.Fatalf("元信息 tools=%v 与清单数量不一致: %+v", info.Tools, list.Result.Tools)
+			}
+			for _, name := range info.Tools {
+				if _, ok := mcpToolByName(list.Result.Tools, name); !ok {
+					t.Fatalf("元信息列出的 %s 不在 tools/list 中: %+v", name, list.Result.Tools)
+				}
+			}
+		})
+	}
+}
+
+// TestMCPUnknownToolStillReturnsProtocolError 验证未知工具名仍是 JSON-RPC 错误，
+// 与「已知但被禁用」的工具结果 isError 区分开。
+func TestMCPUnknownToolStillReturnsProtocolError(t *testing.T) {
+	h := &Handler{store: &mcpTestStore{}}
+	h.EnableFetch(true)
+	r := chi.NewRouter()
+	h.mountMCP(r, "/mcp")
+
+	rec := mcpPost(t, r, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"nope","arguments":{}}}`)
+	var resp struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("未知工具名应返回 -32602，实际: %s", rec.Body.String())
 	}
 }
 

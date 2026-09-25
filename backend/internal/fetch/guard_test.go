@@ -123,8 +123,13 @@ func TestGuardDialerTrustsConfiguredProxy(t *testing.T) {
 // fakeRawConn 是 syscall.RawConn 的最小替身：护栏不用它，只是签名要求。
 type fakeRawConn struct{}
 
-func (f *fakeRawConn) Control(func(uintptr)) error    { return nil }
-func (f *fakeRawConn) Read(func(uintptr) bool) error  { return nil }
+// Control 是 syscall.RawConn 接口的占位实现；护栏不使用它，仅为满足类型要求。
+func (f *fakeRawConn) Control(func(uintptr)) error { return nil }
+
+// Read 是 syscall.RawConn 接口的占位实现；护栏不使用它，仅为满足类型要求。
+func (f *fakeRawConn) Read(func(uintptr) bool) error { return nil }
+
+// Write 是 syscall.RawConn 接口的占位实现；护栏不使用它，仅为满足类型要求。
 func (f *fakeRawConn) Write(func(uintptr) bool) error { return nil }
 
 // TestProxyClientKeepsPrivateTargetBlocked 验证走代理时目标侧的字面量兜底检查：
