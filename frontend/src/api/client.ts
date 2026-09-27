@@ -245,7 +245,7 @@ export interface FetchSettings {
   proxy_url: string
   /** 放行内网与环回目标；公网部署必须为 false，否则等于开放 SSRF 跳板 */
   allow_private: boolean
-  /** 单次抓取超时（毫秒），上界 60000（受反向代理 65s 超时约束） */
+  /** 单次抓取超时（毫秒），上界 60000（nginx 反代读取超时默认 65s，略大于它） */
   timeout_ms: number
   /** 兜底回退总开关；开启后内置抓取失败或内容过少时会改用 Tavily extract，并按量消耗第三方额度 */
   fallback_enabled: boolean

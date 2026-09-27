@@ -5,6 +5,15 @@ log() {
   printf '%s\n' "$*"
 }
 
+# nginx 配置模板与渲染产物。模板里的 __XXX__ 占位符由 render_nginx_config 替换。
+# 模板放在 /etc/nginx 下而非 /app，是为了与 nginx 自身的配置就近，便于排错时对照。
+NGINX_TEMPLATE="${NGINX_TEMPLATE:-/etc/nginx/nginx.conf.template}"
+NGINX_CONF_OUT="${NGINX_CONF_OUT:-/etc/nginx/http.d/default.conf}"
+# nginx -t 的包装配置：把渲染结果 include 进一个最小的 http 上下文，
+# 这样不依赖运行中的主配置也能校验站点配置的语法。
+# 该文件由 Dockerfile 在构建期生成，路径必须与那里保持一致。
+NGINX_TEST_WRAPPER="${NGINX_TEST_WRAPPER:-/etc/nginx/nginx-test.conf}"
+
 escape_sql_literal() {
   printf "%s" "$1" | sed "s/'/''/g"
 }
@@ -103,6 +112,124 @@ ensure_database() {
   fi
 }
 
+# nginx_value_or_default 校验单个 nginx 配置值，为空或非法时回落到默认值。
+#
+# 参数：$1 待校验值（可为空）；$2 默认值；$3 变量名（仅用于日志）。
+# 返回：合法的配置值，保证非空。
+# 为什么必须校验而不是直接透传：这些值会被拼进 nginx.conf，非法值会让 nginx 启动失败；
+# 而 nginx 与后端同处一个容器，失败意味着整个容器起不来 —— 代价远大于「退回默认值继续跑」。
+nginx_value_or_default() {
+  # 形参不能省略实参：set -u 下缺参会直接终止，
+  # 而本函数的存在意义正是「容忍缺失」，因此这里显式取空串兜底
+  value="${1:-}"
+  default="$2"
+  name="$3"
+  if [ -z "$value" ]; then
+    printf '%s' "$default"
+    return 0
+  fi
+  # nginx 合法取值：纯数字（client_max_body_size 的字节数），或数字后跟单个单位字母。
+  # 尺寸单位是 k/m/g，时间单位是 s/m/h/d（两者共用 m，故合并成一组字母）。
+  # 判定方式是先剥掉可能的单位字母，再要求余下部分全为数字 —— 这样 "5242880"、"5m"、
+  # "130s" 通过，而 "5*1024*1024"、"abc"、"5m|s|65s|" 被拒。
+  # 必须白名单式校验：这些值会被拼进 nginx 配置，非法值不仅让 nginx 起不来
+  # （与后端同容器，等于整个容器起不来），还可能夹带 sed 分隔符破坏模板替换。
+  core="$value"
+  case "$value" in
+    *[kKmMgGsShHdD]) core="${value%?}" ;;
+  esac
+  case "$core" in
+    ''|*[!0-9]*)
+      log "invalid $name='$value', falling back to $default"
+      printf '%s' "$default"
+      ;;
+    *)
+      printf '%s' "$value"
+      ;;
+  esac
+}
+
+# nginx_proxy_timeout_default 由后端写超时推导 nginx 的反代超时。
+#
+# 为什么要有这层推导：nginx 的 proxy_read_timeout 约束「后端多久没吐数据就断开」，
+# 后端的 SERVER_WRITE_TIMEOUT_MS 约束「它最多花多久写响应」。二者取小值才是调用方
+# 实际能等到的上限；若 nginx 更小，后端还没写完就被切断，调用方只会看到 504。
+# 因此默认让 nginx 比后端宽 5s，避免边界上互相踩。
+#
+# 返回：形如 "130s" 的字符串；未显式配置 SERVER_WRITE_TIMEOUT_MS 时返回 65s（出厂值）。
+# 无副作用。
+nginx_proxy_timeout_default() {
+  ms="${SERVER_WRITE_TIMEOUT_MS:-}"
+  # 非数字（含空串）时不做推导：说明用户没打算调超时，或值本身有误，
+  # 此时保持出厂默认，具体数值由后端自己校验
+  case "$ms" in
+    ''|*[!0-9]*) printf '65s'; return 0 ;;
+  esac
+  # 毫秒向上取整到秒，再加 5s 余量
+  printf '%ss' "$(( (ms + 999) / 1000 + 5 ))"
+}
+
+# nginx_body_size_default 由后端请求体上限推导 nginx 的 client_max_body_size。
+#
+# 为什么要有这层推导：nginx 在外层，client_max_body_size 先于后端 bodyLimitMiddleware 生效，
+# 若前者更小，调大 .env 里的 REQUEST_BODY_LIMIT_BYTES 完全看不到效果（请求先被 nginx 413）。
+# 直接沿用同一数值，保证两层口径一致。
+#
+# 返回：字节数字符串；未显式配置 REQUEST_BODY_LIMIT_BYTES 时返回 1m（出厂值）。
+# 无副作用。
+nginx_body_size_default() {
+  bytes="${REQUEST_BODY_LIMIT_BYTES:-}"
+  case "$bytes" in
+    ''|*[!0-9]*) printf '1m'; return 0 ;;
+  esac
+  printf '%s' "$bytes"
+}
+
+# render_nginx_config 把 nginx 配置模板渲染成最终配置。
+#
+# 背景：nginx 自身不读环境变量，而它的体积/超时限制与后端成对生效（见上面两个推导函数）。
+# 配置若在构建期就烤进镜像，就会出现「改了 .env 却不生效」。因此在启动 nginx 前
+# 做一次占位符替换，让环境变量成为唯一的配置入口。
+#
+# 每个占位符的取值优先级：显式指定的 NGINX_* 变量 > 从后端配置推导 > 出厂默认。
+# 侧面：写出 $NGINX_CONF_OUT；渲染结果经 nginx -t 校验，失败时退回全默认值再渲染一次。
+# 副作用：覆盖 $NGINX_CONF_OUT 文件。
+render_nginx_config() {
+  # 注意：本脚本以 set -eu 运行，未设置的变量直接引用会终止启动，
+  # 因此这四项一律用 ${VAR:-} 取「可能为空」的值，再由 nginx_value_or_default 补默认
+  body=$(nginx_value_or_default "${CLIENT_MAX_BODY_SIZE:-}" "$(nginx_body_size_default)" "CLIENT_MAX_BODY_SIZE")
+  connect=$(nginx_value_or_default "${NGINX_PROXY_CONNECT_TIMEOUT:-}" "65s" "NGINX_PROXY_CONNECT_TIMEOUT")
+  read_timeout=$(nginx_value_or_default "${NGINX_PROXY_READ_TIMEOUT:-}" "$(nginx_proxy_timeout_default)" "NGINX_PROXY_READ_TIMEOUT")
+  send_timeout=$(nginx_value_or_default "${NGINX_PROXY_SEND_TIMEOUT:-}" "$(nginx_proxy_timeout_default)" "NGINX_PROXY_SEND_TIMEOUT")
+
+  write_nginx_config "$body" "$connect" "$read_timeout" "$send_timeout"
+  # 语法自检：模板被改坏或变量含特殊字符时能在这里拦住，
+  # 而不是等到 nginx 启动失败、整个容器退出
+  if nginx -t -c "$NGINX_TEST_WRAPPER" >/dev/null 2>&1; then
+    log "nginx config ready: body=$body connect=$connect read=$read_timeout send=$send_timeout"
+    return 0
+  fi
+  log "nginx config invalid, retrying with factory defaults"
+  write_nginx_config "1m" "65s" "65s" "65s"
+  if ! nginx -t -c "$NGINX_TEST_WRAPPER" >/dev/null 2>&1; then
+    log "nginx config still invalid after fallback; aborting"
+    exit 1
+  fi
+  log "nginx config ready: factory defaults"
+}
+
+# write_nginx_config 按给定四个值渲染模板并写出最终配置。
+#
+# 参数：$1 体积上限；$2 建连超时；$3 读超时；$4 写超时。
+# 副作用：覆盖 $NGINX_CONF_OUT。分隔符用 | 而非 /，因为值里可能含斜杠。
+write_nginx_config() {
+  sed -e "s|__CLIENT_MAX_BODY_SIZE__|$1|" \
+      -e "s|__PROXY_CONNECT_TIMEOUT__|$2|" \
+      -e "s|__PROXY_READ_TIMEOUT__|$3|" \
+      -e "s|__PROXY_SEND_TIMEOUT__|$4|" \
+      "$NGINX_TEMPLATE" > "$NGINX_CONF_OUT"
+}
+
 start_backend() {
   export APP_ENV="${APP_ENV:-production}"
   export HTTP_ADDR="${HTTP_ADDR:-:8080}"
@@ -166,6 +293,7 @@ main() {
   start_postgres
   ensure_database
   start_backend
+  render_nginx_config
   start_nginx
 
   log "all-in-one stack is ready"

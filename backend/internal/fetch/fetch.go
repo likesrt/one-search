@@ -47,8 +47,11 @@ const (
 	// defaultTimeout 是单次抓取的总体超时（含重定向链）
 	defaultTimeout = 30 * time.Second
 	// maxTimeout 是超时配置的上界。
-	// 与 deploy/nginx.conf 的 proxy_read_timeout（65s）对齐：再长会先被反代断开，
+	// 与 nginx 反代超时（deploy/nginx.conf.template 的 proxy_read_timeout，
+	// 默认 65s、可经 NGINX_PROXY_READ_TIMEOUT 调整）对齐：再长会先被反代断开，
 	// 调用方只会看到 504，反而丢失真实错误。
+	// 取值仍是硬上限而非跟随环境变量：上界本身要可预期，才能保证「配了更长的超时」
+	// 不会在某个部署里变成 504。放宽它需同时上调 nginx 反代超时。
 	maxTimeout = 60 * time.Second
 	// defaultMaxRedirects 是允许跟随的最大重定向次数
 	defaultMaxRedirects = 10

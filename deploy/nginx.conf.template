@@ -1,13 +1,32 @@
+# One Search Relay —— nginx 站点配置模板
+#
+# 本文件是【模板】而非最终配置：容器启动时由 all-in-one-entrypoint.sh 把
+# __XXX__ 占位符替换成环境变量的值，写出 /etc/nginx/http.d/default.conf 后
+# 才启动 nginx。
+#
+# 为什么需要这层替换：nginx 自身不读环境变量，而它的 client_max_body_size
+# 与 proxy_*_timeout 会和后端的 REQUEST_BODY_LIMIT_BYTES / SERVER_*_TIMEOUT_MS
+# 成对生效（nginx 在外层先拦），配置硬编码进镜像会导致「改了 .env 却不生效」。
+#
+# 占位符与对应环境变量、默认值：
+#   __CLIENT_MAX_BODY_SIZE__  ← CLIENT_MAX_BODY_SIZE  默认 1m
+#   __PROXY_CONNECT_TIMEOUT__ ← NGINX_PROXY_CONNECT_TIMEOUT  默认 65s
+#   __PROXY_READ_TIMEOUT__    ← NGINX_PROXY_READ_TIMEOUT     默认 65s
+#   __PROXY_SEND_TIMEOUT__    ← NGINX_PROXY_SEND_TIMEOUT     默认 65s
+#
+# 注意：read/send 超时必须不小于后端的 SERVER_WRITE_TIMEOUT_MS，否则后端还没
+# 写完连接就被 nginx 切断，调用方只会看到 504 而非真实错误。
+
 server {
     listen 80;
     server_name _;
 
     root /usr/share/nginx/html;
     index index.html;
-    client_max_body_size 1m;
-    proxy_connect_timeout 65s;
-    proxy_read_timeout 65s;
-    proxy_send_timeout 65s;
+    client_max_body_size __CLIENT_MAX_BODY_SIZE__;
+    proxy_connect_timeout __PROXY_CONNECT_TIMEOUT__;
+    proxy_read_timeout __PROXY_READ_TIMEOUT__;
+    proxy_send_timeout __PROXY_SEND_TIMEOUT__;
 
     add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'" always;
     add_header X-Content-Type-Options "nosniff" always;

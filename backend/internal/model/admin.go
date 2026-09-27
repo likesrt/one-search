@@ -104,8 +104,9 @@ type FetchSettings struct {
 	// AllowPrivate 放行内网与环回目标。作为公网服务必须为 false，
 	// 否则调用方可借本服务探测内网（SSRF）
 	AllowPrivate bool `json:"allow_private"`
-	// TimeoutMS 是单次抓取的总体超时，上界 60000：deploy/nginx.conf 的
-	// proxy_read_timeout 是 65s，配得比它更长只会先被反代断开而对外表现为 504
+	// TimeoutMS 是单次抓取的总体超时，上界 60000：nginx 反代超时
+	// （deploy/nginx.conf.template 的 proxy_read_timeout，默认 65s）比它略大，
+	// 配得更长只会先被反代断开而对外表现为 504
 	TimeoutMS int `json:"timeout_ms"`
 	// FallbackEnabled 是 Tavily 兜底回退的总开关，默认 false：
 	// 开启后才会消耗按量付费的第三方额度，因此必须由管理员显式打开

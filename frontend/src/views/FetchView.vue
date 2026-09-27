@@ -146,7 +146,7 @@
           <div class="field">
             <label>抓取超时 (ms)</label>
             <el-input-number v-model="settings.timeout_ms" :min="1" :max="60000" :step="1000" controls-position="right" />
-            <span class="hint">上界 60000：反向代理读取超时为 65s，配得更长会先被断开</span>
+            <span class="hint">上界 60000：nginx 反代读取超时略大于它（默认 65s），配得更长会先被断开</span>
           </div>
           <div class="field field-full">
             <label>抓取代理</label>

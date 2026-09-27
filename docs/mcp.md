@@ -11,7 +11,7 @@ One Search Relay 支持可选 MCP Streamable HTTP / HTTP JSON-RPC 接口，用�
 - 环境变量配置：`backend/internal/config/config.go`
 - Docker Compose 环境变量：`docker-compose.yml`
 - all-in-one 容器启动脚本：`deploy/all-in-one-entrypoint.sh`
-- Nginx 代理：`deploy/nginx.conf`
+- Nginx 代理：`deploy/nginx.conf.template`（占位符由入口脚本在启动时按环境变量渲染）
 
 ## 2. 开关配置
 

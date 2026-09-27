@@ -347,8 +347,10 @@ func (h *Handler) updateFetchSettings(w http.ResponseWriter, r *http.Request) {
 
 // validateFetchSettings 校验抓取配置的取值范围。
 //
-// timeout_ms 上界 60000 与 deploy/nginx.conf 的 proxy_read_timeout(65s) 对齐：
-// 配得更长只会先被反代断开，对外表现为 504 而非真实的抓取错误。
+// timeout_ms 上界 60000 与 nginx 反代超时（deploy/nginx.conf.template 的
+// proxy_read_timeout，默认 65s）对齐：配得更长只会先被反代断开，对外表现为 504
+// 而非真实的抓取错误。该上界硬编码在 fetch 包（fetch.go 的 maxTimeout），
+// 不随环境变量变化；确实需要更长的抓取超时时，要一并上调那里的常量与反代超时。
 // 放入库前统一格式；代理地址格式非法时直接拒绝，避免存入一个永远连不上的值。
 //
 // 新增字段的校验口径：只拦「会引发资源问题」的越界值，不拦宽松但合法的取值。

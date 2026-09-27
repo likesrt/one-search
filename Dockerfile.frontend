@@ -6,6 +6,15 @@ COPY frontend/ ./
 RUN npm run build
 
 FROM nginx:1.27-alpine
-COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+# 站点配置来自模板（模板里带 __XXX__ 占位符）。本镜像是「只跑前端」的独立形态，
+# 没有 all-in-one 入口脚本做运行时渲染，故在构建期用出厂默认值渲染一次，
+# 行为与改造前的静态配置一致；需要改体积/超时上限时请用根目录 Dockerfile 的一体化镜像。
+COPY deploy/nginx.conf.template /tmp/nginx.conf.template
+RUN sed -e 's|__CLIENT_MAX_BODY_SIZE__|1m|' \
+        -e 's|__PROXY_CONNECT_TIMEOUT__|65s|' \
+        -e 's|__PROXY_READ_TIMEOUT__|65s|' \
+        -e 's|__PROXY_SEND_TIMEOUT__|65s|' \
+        /tmp/nginx.conf.template > /etc/nginx/conf.d/default.conf \
+    && rm -f /tmp/nginx.conf.template
 COPY --from=builder /app/frontend/dist /usr/share/nginx/html
 EXPOSE 80

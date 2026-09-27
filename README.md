@@ -160,6 +160,11 @@ enabled_tools = ["search", "fetch"]
 注意：`HTTP_ADDR` 与 `DATABASE_URL` 由容器入口脚本自行设置（后端监听 `:8080`、
 连接容器内的 PostgreSQL），不需要也不应该写在 `.env` 里。
 
+容器内 nginx 的站点配置由 `deploy/nginx.conf.template` 渲染而来：入口脚本在启动
+nginx 之前把 `__XXX__` 占位符替换成环境变量值，所以 nginx 的体积与超时上限同样
+通过 `.env` 控制，不需要重建镜像。默认情况下（不设任何 `NGINX_*`）它会自动跟随
+后端取值，只在需要让两层不一致时才要显式设置，详见 `.env.example`。
+
 公网请在前面加 HTTPS 反代，转发 `/`、`/api/`、`/v1/`、`/healthz`（以及 `/mcp`）。
 
 网页抓取的配置不在 `.env` 里，而是管理台「网页抓取」页的运行期配置（存 `settings` 表，
