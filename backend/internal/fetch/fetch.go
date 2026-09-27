@@ -17,6 +17,7 @@ package fetch
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -24,6 +25,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -51,10 +54,31 @@ const (
 	defaultMaxRedirects = 10
 	// dialTimeout 是单次 TCP 建连超时
 	dialTimeout = 10 * time.Second
+	// maxConnsPerHost 限制到单个主机的并发连接数。
+	// 与全局并发闸门互补：闸门约束「同时在飞的抓取总数」，本项约束「其中打向同一主机的数量」，
+	// 后者才是目标站点真正感受到的压力。取 16 与闸门默认值 32 配合，留出多站点并发的余量。
+	maxConnsPerHost = 16
 )
 
 // ToolName 是暴露给模型的 MCP 工具名，同时也是续读提示中回指的调用名。
 const ToolName = "fetch"
+
+// ErrCacheTooLarge 表示单条抓取结果超过 cache_max_bytes 而未写入缓存。
+//
+// 导出而非仅记日志：调用方需要区分「缓存被刻意关闭」与「内容太大没缓存」，
+// 前者不需要任何提示，后者在排查「为什么大页面每次都打上游」时是必要信息。
+var ErrCacheTooLarge = errors.New("fetch result exceeds cache_max_bytes")
+
+// Fallback 是抓取失败或内容不可用时调用的兜底通道。
+//
+// 定义在 fetch 包而不是直接依赖某个渠道的适配器，是为了让本包与具体第三方解耦：
+// 本包只负责「何时该兜底」，用哪条通道、如何取 key 与记账都由 api 层实现。
+// 返回值为：正文（完整、未截断）、本次消耗的额度、错误。
+type Fallback interface {
+	// Fetch 取回 targetURL 的正文。返回 error 时调用方按「无回退」处理，
+	// 绝不因此把原本成功的抓取改成失败。
+	Fetch(ctx context.Context, targetURL string) (string, float64, error)
+}
 
 // Config 是抓取执行体的外部配置，由调用方从数据库配置注入，本包不读库。
 type Config struct {
@@ -68,6 +92,20 @@ type Config struct {
 	MaxResponseBytes int64
 	// UserAgent 是默认 User-Agent，可被请求级 headers 覆盖，空串时取 defaultUserAgent
 	UserAgent string
+	// Fallback 是内容不可用时的兜底通道，nil 表示不做回退（默认，零开销）
+	Fallback Fallback
+	// FallbackMinChars 是触发回退的可见文本长度阈值，非正时取 defaultFallbackMinChars
+	FallbackMinChars int
+	// CacheDir 是缓存目录，空串表示不缓存
+	CacheDir string
+	// CacheTTLSeconds 是正常内容的缓存时长，非正时视为不缓存
+	CacheTTLSeconds int
+	// CacheErrorTTLSeconds 是 401/403/429 结果的缓存时长，非正时回落到 CacheTTLSeconds
+	CacheErrorTTLSeconds int
+	// CacheMaxBytes 是单条缓存上限（字节），非正表示不限
+	CacheMaxBytes int64
+	// MaxConcurrency 是同时在飞的上游抓取上限，非正时取 defaultMaxConcurrency
+	MaxConcurrency int
 }
 
 // Result 是单次抓取的原生结果，REST 与管理台试抓共用这一结构。
@@ -80,10 +118,15 @@ type Result struct {
 	URL string `json:"url"`
 	// Method 是实际使用的出站方法，仅 GET 或 POST
 	Method string `json:"method"`
-	// StatusCode 是上游响应状态码，可能为 4xx/5xx
+	// StatusCode 是上游响应状态码，可能为 4xx/5xx。
+	// 内容来自回退通道（Channel 为 tavily）时恒为 200：回退正文是真实内容，
+	// 报内置抓取的状态码会让 Result.Text() 在正文前补一行假的错误码。
 	StatusCode int `json:"status_code"`
-	// ContentType 是上游响应的 Content-Type 原始值，未提供时为空串
+	// ContentType 是上游响应的 Content-Type 原始值，未提供时为空串；
+	// 回退通道下固定为 text/markdown
 	ContentType string `json:"content_type"`
+	// Channel 标明内容来自哪条通道：direct（内置抓取）或 tavily（回退）
+	Channel string `json:"channel"`
 	// Content 是归一化并按 max_length 截断后的内容（含续读提示）
 	Content string `json:"content"`
 	// Truncated 表示内容是否因超出 max_length 而被截断
@@ -124,13 +167,32 @@ type Fetcher struct {
 	// proxy 是管理员配置的代理，nil 表示直连；代理地址视为可信（拨号层放行），
 	// 但仍会对目标地址做字面量兜底检查，见 guard.go
 	proxy *url.URL
+	// fallback 是兜底通道，nil 表示不做回退
+	fallback Fallback
+	// fallbackMinChars 是触发回退的可见文本长度阈值，恒为正数
+	fallbackMinChars int
+	// cacheDir 是缓存目录，空串表示不缓存
+	cacheDir string
+	// cacheTTL 与 cacheErrorTTL 是两种缓存时长（秒），语义见 cache.go 的 cacheTTLFor
+	cacheTTL      int
+	cacheErrorTTL int
+	// cacheMaxBytes 是单条缓存上限（字节），非正表示不限
+	cacheMaxBytes int64
+	// gate 限流打向上游的抓取并发，缓存命中与单飞等待者不占名额
+	gate *gate
+	// group 按缓存键合并同一 URL 的并发首次抓取，避免「同一秒 10 个相同 URL 打 10 次上游」
+	group singleflight.Group
 }
 
 // NewFetcher 构造抓取执行体。
 //
 // 参数 cfg 中的零值都会被替换为安全默认值：Timeout 非正取 30s（超过 60s 收敛到 60s）、
-// MaxResponseBytes 非正取 10MiB、UserAgent 为空取浏览器标识。ProxyURL 会被解析，
-// 解析失败时按「无代理」处理并记日志 —— 宁可直连失败，也不能带着一个不确定的代理运行。
+// MaxResponseBytes 非正取 10MiB、UserAgent 为空取浏览器标识、FallbackMinChars 非正取 80、
+// MaxConcurrency 非正取取 32。ProxyURL 会被解析，解析失败时按「无代理」处理并记日志 ——
+// 宁可直连失败，也不能带着一个不确定的代理运行。
+//
+// 缓存配置是「配置即开关」：CacheDir 为空或 CacheTTLSeconds 非正时不做任何缓存读写，
+// 因此调用方不需要额外的布尔开关。
 //
 // 返回的 *Fetcher 可安全并发使用；代理客户端只构造一次以保留连接池。
 //
@@ -141,6 +203,16 @@ func NewFetcher(cfg Config) *Fetcher {
 		maxResponseBytes: cfg.MaxResponseBytes,
 		userAgent:        strings.TrimSpace(cfg.UserAgent),
 		allowPrivate:     cfg.AllowPrivate,
+		fallback:         cfg.Fallback,
+		fallbackMinChars: cfg.FallbackMinChars,
+		cacheDir:         strings.TrimSpace(cfg.CacheDir),
+		cacheTTL:         cfg.CacheTTLSeconds,
+		cacheErrorTTL:    cfg.CacheErrorTTLSeconds,
+		cacheMaxBytes:    cfg.CacheMaxBytes,
+		gate:             newGate(cfg.MaxConcurrency),
+	}
+	if fetcher.fallbackMinChars <= 0 {
+		fetcher.fallbackMinChars = defaultFallbackMinChars
 	}
 	if fetcher.maxResponseBytes <= 0 {
 		fetcher.maxResponseBytes = defaultMaxResponseBytes
@@ -155,6 +227,14 @@ func NewFetcher(cfg Config) *Fetcher {
 	fetcher.proxy = proxy
 	fetcher.client = fetcher.buildClient(proxy)
 	return fetcher
+}
+
+// cacheEnabled 报告本次配置是否启用了缓存。
+//
+// 判定集中在一点：目录为空或 TTL 非正都视为关闭，避免读写两侧各自判断而出现
+// 「写进去了但永远读不出来」这类不一致。
+func (f *Fetcher) cacheEnabled() bool {
+	return f.cacheDir != "" && f.cacheTTL > 0
 }
 
 // normalizeTimeout 收敛超时配置到 [1s, maxTimeout] 区间。
@@ -176,9 +256,13 @@ func normalizeTimeout(value time.Duration) time.Duration {
 // 两种形态共用同一份拨号护栏：直连时护栏判定目标是内网则拦截；
 // 走代理时护栏放行代理主机自身的 IP（管理员配置的代理视为可信），
 // 目标侧的字面量兜底检查在 doRequest 里另行完成。
+//
+// MaxConnsPerHost 是必需的上限：默认值 0 表示不限制，一个客户端并发抓同一站点时
+// 可以无限开连接，既耗尽本机 fd，也会立刻把目标站点打成限流。
 func (f *Fetcher) buildClient(proxy *url.URL) *http.Client {
 	transport := &http.Transport{
 		MaxIdleConns:          100,
+		MaxConnsPerHost:       maxConnsPerHost,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   dialTimeout,
 		ExpectContinueTimeout: time.Second,
@@ -195,6 +279,7 @@ func (f *Fetcher) buildClient(proxy *url.URL) *http.Client {
 		log.Printf("fetch: 代理 %q 不可用，已按直连处理: %v", proxy, err)
 		direct := &http.Transport{
 			MaxIdleConns:          100,
+			MaxConnsPerHost:       maxConnsPerHost,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   dialTimeout,
 			ExpectContinueTimeout: time.Second,
@@ -228,42 +313,170 @@ func newHTTPClient(transport http.RoundTripper, timeout time.Duration) *http.Cli
 // 返回的 Result 在「上游返回任何状态码」时都是有效的：4xx/5xx 页面同样算抓取成功，
 // 状态码通过 Result.StatusCode 透出。
 //
+// 流程分四步，顺序不可调换：
+//  1. 查缓存（不进并发闸门，读一个本地文件很便宜）—— 命中直接按本次请求切片返回；
+//  2. 未命中则按缓存键单飞：同一 URL 的并发首次抓取只打一次上游，其余等结果；
+//  3. 单飞内部先取并发名额再抓，随后按触发条件与四道闸门决定是否回退，最后写缓存；
+//  4. 按本次请求的 max_length / start_index 切片后返回。
+//
+// 单飞返回的是完整条目而非切片段，正是因为并发请求的 max_length 各不相同。
+//
 // 返回 error 仅表示传输层失败：连不上、超时、TLS 失败、DNS 失败、被 SSRF 护栏拦截、
 // 响应体读取失败。调用方应据此映射为 502（或工具结果的 isError）。
 //
-// 副作用：发起真实网络请求；响应体最多读取 maxResponseBytes 字节。
+// 副作用：发起真实网络请求；可能读写缓存文件；触发回退时消耗第三方额度。
 func (f *Fetcher) Fetch(ctx context.Context, req Request) (Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, f.timeout)
 	defer cancel()
 
-	resp, err := f.doRequest(ctx, req)
+	if f.cacheEnabled() {
+		if entry, hit := readCache(f.cacheDir, cacheKey(req), f.cacheTTL, f.cacheErrorTTL); hit {
+			return f.resultFromEntry(req, entry), nil
+		}
+	}
+	entry, err := f.fetchShared(ctx, req)
 	if err != nil {
 		return Result{}, err
+	}
+	return f.resultFromEntry(req, entry), nil
+}
+
+// fetchShared 通过单飞组取得完整缓存条目，保证同一 URL 的并发首次抓取只打一次上游。
+//
+// 用 DoChan 而不是 Do：Do 让等待者复用第一个调用方的 context，第一个调用方断开会把
+// 所有等待者一起带崩（表现为莫名其妙的 context canceled）。DoChan 配合 select 让每个
+// 调用方只受自己的 ctx 约束，取消互不影响。
+//
+// 返回值：完整条目（内容未截断）与错误；调用方各自的 ctx 结束时返回其错误。
+// 副作用：可能发起上游请求、读写缓存、消耗回退额度。
+func (f *Fetcher) fetchShared(ctx context.Context, req Request) (CacheEntry, error) {
+	key := cacheKey(req)
+	result := f.group.DoChan(key, func() (interface{}, error) {
+		// 上游抓取不跟随第一个调用方取消：已写出的请求不该被半途放弃，
+		// 而且等待者仍需要这次结果。deadline 保留，总耗时仍有上界。
+		flightCtx, cancel := detachContext(ctx)
+		defer cancel()
+		return f.fetchUpstream(flightCtx, req, key)
+	})
+	select {
+	case <-ctx.Done():
+		return CacheEntry{}, ctx.Err()
+	case outcome := <-result:
+		if outcome.Err != nil {
+			return CacheEntry{}, outcome.Err
+		}
+		entry, ok := outcome.Val.(CacheEntry)
+		if !ok {
+			return CacheEntry{}, fmt.Errorf("Failed to fetch %s: 内部结果类型异常", req.URL)
+		}
+		return entry, nil
+	}
+}
+
+// fetchUpstream 执行「取名额 → 内置抓取 → 按需回退 → 写缓存」的单飞主体。
+//
+// 并发名额只护住上游 IO（内置抓取与回退两步）：缓存命中与单飞等待者不占名额，
+// 闸门要挡的是打向上游的并发，而不是进来的请求数。
+//
+// 已知取舍：若在名额上等待过久导致 ctx 超时，按传输层失败返回并因此进入回退判定，
+// 不做特殊处理（与计划一致）。
+//
+// 返回值：最终条目与错误；错误仅来自内置抓取，回退失败不影响返回值。
+// 副作用：读写的缓存文件、发出的上游请求与消耗的回退额度。
+func (f *Fetcher) fetchUpstream(ctx context.Context, req Request, key string) (CacheEntry, error) {
+	if err := f.gate.acquire(ctx); err != nil {
+		return CacheEntry{}, err
+	}
+	defer f.gate.release()
+
+	entry, fetchErr := f.fetchDirect(ctx, req)
+	entry, fetchErr = f.applyFallback(ctx, req, entry, fetchErr)
+	f.storeCache(key, entry, fetchErr)
+	if fetchErr != nil {
+		return CacheEntry{}, fetchErr
+	}
+	return entry, nil
+}
+
+// fetchDirect 执行内置抓取并归一化内容，返回条目与传输层错误。
+//
+// 状态码为 4xx/5xx 时不算错误：响应体本身是有效内容，调用方据此判断是否回退。
+// 归一化（HTML 转 Markdown / JSON 压缩）在此完成，因此缓存里存的是归一化后的正文，
+// 续读时无需重复转换。
+func (f *Fetcher) fetchDirect(ctx context.Context, req Request) (CacheEntry, error) {
+	resp, err := f.doRequest(ctx, req)
+	if err != nil {
+		return CacheEntry{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := readBody(resp, f.maxResponseBytes)
 	if err != nil {
-		return Result{}, err
+		return CacheEntry{}, err
 	}
 	contentType := resp.Header.Get("Content-Type")
 	text := decodeBody(body)
 	if !req.Raw {
 		text = contentForModel(text, strings.ToLower(contentType))
 	}
-	bounded := boundText(text, req)
-	return f.newResult(req, resp, contentType, bounded), nil
+	return CacheEntry{
+		URL:         req.URL.String(),
+		Method:      req.Method,
+		StatusCode:  resp.StatusCode,
+		ContentType: strings.TrimSpace(contentType),
+		Channel:     ChannelDirect,
+		Content:     text,
+	}, nil
 }
 
-// newResult 把响应与截断结果组装为对外结构。
+// storeCache 写入缓存，并在写完后把该键移出单飞组。
 //
-// 单独拆出是为了让 Fetch 保持在可读长度内。
-func (f *Fetcher) newResult(req Request, resp *http.Response, contentType string, bounded boundOutput) Result {
+// 不缓存传输层失败（fetchErr 非 nil）：一次 DNS 抖动或超时若被缓存 120 秒，
+// 会让一个本来正常的 URL 在窗口内持续失败。而 4xx/5xx 是内容型结果，必须缓存 ——
+// 避免反复撞同一道门禁正是本次加缓存的初衷。
+//
+// 必须调用 group.Forget：单飞的键在 fn 返回后虽已从内部 map 删除，但这里显式调用
+// 是为了在写缓存失败等分支上也保持「键不再被持有」的语义，避免后续请求命中旧条目。
+//
+// 副作用：写缓存文件；失败只记日志（缓存失效不该让抓取失败）。
+func (f *Fetcher) storeCache(key string, entry CacheEntry, fetchErr error) {
+	defer f.group.Forget(key)
+	if !f.cacheEnabled() || fetchErr != nil {
+		return
+	}
+	if err := writeCache(f.cacheDir, key, entry, f.cacheMaxBytes); err != nil {
+		if errors.Is(err, ErrCacheTooLarge) {
+			log.Printf("fetch: 内容超过单条缓存上限，未缓存 %s (%d 字节)", entry.URL, len(entry.Content))
+			return
+		}
+		log.Printf("fetch: 写缓存失败 %s: %v", entry.URL, err)
+	}
+}
+
+// resultFromEntry 把完整条目按本次请求的 max_length / start_index 切片为对外结果。
+//
+// 每次调用都重新切片，因此不同 max_length 的并发请求可以共享同一次上游抓取。
+//
+// 走回退通道时 StatusCode 一律报 200，而不是缓存条目里那个内置抓取的状态码：
+// Result.Text() 对非 2xx 会在正文前补一行 `HTTP <状态码>`，回退成功却报 403 会让模型
+// 在真正的正文最前面看到一行假的 403。原始状态码不丢 —— 它留在 CacheEntry 里决定
+// 该条用哪种 TTL，而「这次走了回退」由 Channel 标明。
+func (f *Fetcher) resultFromEntry(req Request, entry CacheEntry) Result {
+	bounded := boundText(entry.Content, req)
+	channel := entry.Channel
+	if channel == "" {
+		channel = ChannelDirect
+	}
+	statusCode := entry.StatusCode
+	if channel == ChannelTavily {
+		statusCode = http.StatusOK
+	}
 	return Result{
 		URL:            req.URL.String(),
 		Method:         req.Method,
-		StatusCode:     resp.StatusCode,
-		ContentType:    strings.TrimSpace(contentType),
+		StatusCode:     statusCode,
+		ContentType:    entry.ContentType,
+		Channel:        channel,
 		Content:        bounded.Content,
 		Truncated:      bounded.Truncated,
 		NextStartIndex: bounded.NextIndex,
@@ -281,6 +494,9 @@ func (f *Fetcher) newResult(req Request, resp *http.Response, contentType string
 // 该检查无法覆盖「域名解析到内网」与「代理自身跟随重定向到内网」。
 //
 // 返回 error 时已带上目标地址与原因，便于直接回传给调用方。
+//
+// 包装用 %w 而非 %v：回退闸门需要靠 errors.Is(err, ErrPrivateTarget) 判断「这是被护栏
+// 拦下的内网目标」，用 %v 会把哨兵错误拍平成字符串，判定随之静默失效。
 func (f *Fetcher) doRequest(ctx context.Context, req Request) (*http.Response, error) {
 	if f.proxy != nil {
 		if err := checkTargetLiteral(req.URL, f.allowPrivate); err != nil {
@@ -289,11 +505,11 @@ func (f *Fetcher) doRequest(ctx context.Context, req Request) (*http.Response, e
 	}
 	httpReq, err := f.newHTTPRequest(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to fetch %s: %v", req.URL, err)
+		return nil, fmt.Errorf("Failed to fetch %s: %w", req.URL, err)
 	}
 	resp, err := f.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to fetch %s: %v", req.URL, err)
+		return nil, fmt.Errorf("Failed to fetch %s: %w", req.URL, err)
 	}
 	return resp, nil
 }

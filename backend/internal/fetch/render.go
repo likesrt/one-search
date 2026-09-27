@@ -25,6 +25,16 @@ var (
 	blankLinesRe = regexp.MustCompile(`\n{3,}`)
 	// spaceRunRe 把连续空白压成单个空格，用于纯文本兜底输出
 	spaceRunRe = regexp.MustCompile(`\s+`)
+	// markdownImageRe 匹配 Markdown 图片语法。必须在链接语法之前处理：
+	// 否则 `![alt](url)` 会被链接规则改写为 `!alt`，残留一个叹号。
+	markdownImageRe = regexp.MustCompile(`!\[[^\]]*\]\([^)]*\)`)
+	// markdownLinkRe 匹配 Markdown 链接，替换时保留锚文本（链接目标不算可见文本）
+	markdownLinkRe = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
+	// dataURIRe 匹配内联 data URI。实测 36kr 质询页 1037 个字符里 981 个是 base64 内联图片，
+	// 不剥掉就会把一个只有 56 字正文的页面判成「内容丰富」。
+	dataURIRe = regexp.MustCompile(`data:[^\s)\]]+`)
+	// bareURLRe 匹配裸 URL（未包在 Markdown 语法里的地址）
+	bareURLRe = regexp.MustCompile(`https?://[^\s)\]]+`)
 )
 
 // converter 是包级复用的 HTML→Markdown 转换器。
@@ -243,4 +253,27 @@ func nodeText(n *html.Node) string {
 // collapseSpaces 把连续空白压成单个空格并去除首尾空白，用于纯文本兜底输出。
 func collapseSpaces(s string) string {
 	return strings.TrimSpace(spaceRunRe.ReplaceAllString(s, " "))
+}
+
+// visibleTextLength 统计内容里对模型真正可见的字符数（以 rune 计）。
+//
+// 存在这个口径是因为原始长度会被内联图片与链接目标严重高估：实测 36kr 的质询页原始
+// 1037 个字符里有 981 个是 base64 内联图片，正文仅 56 字，按原始长度判定会把它当成
+// 「内容丰富」而漏掉回退；而 example.com 这类正常短页面（131 字）又不该被误判。
+//
+// 剥离顺序是有意的：先 data URI 与裸 URL —— 它们常嵌在 Markdown 语法内部，先剥掉才能让
+// 后续两条规则匹配到结构完整的 `(...)`；再整段丢弃 Markdown 图片（图片本身不是文本内容）；
+// 最后把 Markdown 链接替换为锚文本。
+//
+// 边界条件：内容为空或全是被剥离的语法时返回 0；空白与其他字符一样计入可见字符，
+// 因为阈值（默认 80）的量级下这点噪声不影响判定。
+// 参数 content 为已归一化的正文（HTML 转换或原样文本）；返回值非负。
+// 本函数为纯函数，不做任何 IO。
+func visibleTextLength(content string) int {
+	stripped := dataURIRe.ReplaceAllString(content, "")
+	stripped = bareURLRe.ReplaceAllString(stripped, "")
+	stripped = markdownImageRe.ReplaceAllString(stripped, "")
+	// $1 是链接的锚文本：链接目标不计入可见文本，但锚文本是模型真正读到的字。
+	stripped = markdownLinkRe.ReplaceAllString(stripped, "$1")
+	return len([]rune(strings.TrimSpace(stripped)))
 }

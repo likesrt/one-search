@@ -17,6 +17,16 @@ import (
 // maximumProxyLength 限制代理地址长度，防止把超长串当作代理地址反复尝试解析。
 const maximumProxyLength = 512
 
+// ErrPrivateTarget 是「目标被 SSRF 护栏拦下」的哨兵错误。
+//
+// 单独定义它的唯一目的是让上层能用 errors.Is 判定拦截原因：回退闸门 1 必须据此
+// 拒绝把内网 URL 外发给第三方，否则内网地址会被 Tavily 拿到（护栏形同虚设）。
+// 用错误文案匹配字符串太脆弱，文案一改判定就静默失效。
+//
+// 三处拦截点（拨号层 Control、checkTargetLiteral 的地址与主机名分支）都用 %w 包装它；
+// net.OpError 与 url.Error 都实现了 Unwrap，因此拨号层的错误能穿透到调用方。
+var ErrPrivateTarget = errors.New("已拦截内网地址")
+
 // newGuardDialer 返回一个在建立 TCP 连接前拦截内网地址的拨号器。
 //
 // 校验放在拨号层而非仅校验 URL，是为了同时覆盖两种绕过手法：一是重定向到内网地址，
@@ -52,7 +62,7 @@ func newGuardDialer(allowPrivate bool, trustedProxyIPs map[string]bool) *net.Dia
 			if trustedProxyIPs[ip.String()] {
 				return nil
 			}
-			return fmt.Errorf("已拦截内网地址 %s", host)
+			return fmt.Errorf("%w %s", ErrPrivateTarget, host)
 		},
 	}
 }
@@ -218,10 +228,10 @@ func checkTargetLiteral(target *url.URL, allowPrivate bool) error {
 	}
 	host := target.Hostname()
 	if ip := net.ParseIP(host); ip != nil && isPrivateIP(ip) {
-		return fmt.Errorf("已拦截内网地址 %s", host)
+		return fmt.Errorf("%w %s", ErrPrivateTarget, host)
 	}
 	if hostLooksPrivate(host) {
-		return fmt.Errorf("已拦截内网主机 %s", host)
+		return fmt.Errorf("%w：内网主机 %s", ErrPrivateTarget, host)
 	}
 	return nil
 }
