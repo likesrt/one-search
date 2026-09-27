@@ -98,6 +98,18 @@ func (p *HTTPProvider) HealthCheck(ctx context.Context, key model.APIKey) error 
 	return nil
 }
 
+// SupportsAnonymousKey 报告该渠道在无密钥时是否能正常调用，默认返回 false。
+//
+// 只有实测确认「不带凭据也能拿到正常结果」的渠道才在自己的适配器里覆写为 true，
+// 因此这里用保守的默认值，新增渠道不必逐个显式声明。
+//
+// 该结果仅用于管理台提示，**不参与任何放行判断**：网关按设计对空密钥条目一律放行，
+// 中转站等场景下本方法返回 false 的渠道也可能因自定义 base_url 而实际可用。
+// 返回值恒为 false，无参数、无副作用。
+func (p *HTTPProvider) SupportsAnonymousKey() bool {
+	return false
+}
+
 // requestURL 拼出最终请求地址。exact 端点（base_url 带 `#` 前缀）下忽略适配器自带的路径，
 // 因为用户给出的地址本身就是完整端点；其余情况沿用 base_url + endpoint 的既有语义。
 func (p *HTTPProvider) requestURL(endpoint string) string {

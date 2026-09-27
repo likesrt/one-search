@@ -22,7 +22,7 @@ const (
 
 // Context7Provider 是 Context7 文档渠道适配器。
 // 它检索的是 GitHub 仓库的结构化文档与代码片段，与其余渠道的「通用网页搜索」定位互补：
-// 只实现带 key 的 GET /v3/search（鉴权头 Authorization: Bearer）。
+// 只实现 GET /v3/search，key 非空时带 Authorization: Bearer 鉴权，为空时匿名调用（实测同样返回 200）。
 type Context7Provider struct {
 	*HTTPProvider
 }
@@ -39,11 +39,23 @@ func NewContext7Provider(cfg Config) *Context7Provider {
 	return &Context7Provider{HTTPProvider: NewHTTPProvider(cfg)}
 }
 
+// SupportsAnonymousKey 报告 Context7 在无密钥时能否正常调用，恒为 true。
+//
+// 依据是实测：GET /v3/search 不带 Authorization 返回 200 与正常的 codeSnippets / infoSnippets，
+// 而带无效 key 反而返回 401 invalid_api_key —— 说明该 key 是可选增强（更高配额）而非必需凭据。
+// 返回 true 只影响管理台提示（创建空密钥时不弹确认框），不改变 Search 的放行逻辑。
+func (p *Context7Provider) SupportsAnonymousKey() bool {
+	return true
+}
+
 // Search 调用 Context7 的 GET /v3/search。
 //
 // 参数：req.Query 为必填的检索原文；req.Options 里的 library（可多值）/version/language 原样透传给上游；
 // req.Limit 只在本适配器内生效（上游不接受 limit 参数）；req.Freshness 不读取（上游没有时效参数）。
-// key.Value 为空时不发送 Authorization 头（与 jina 同款防御性写法），非空时发送 Bearer。
+// key.Value 去空白后为空时不发送 Authorization 头（匿名调用），非空时发送 Bearer。
+// 判据刻意与 security.MaskSecret、keenable 的匿名分支同源（TrimSpace 后为空）：
+// 管理台正是按 MaskSecret 的结果把空 key_hint 显示成「匿名」，若这里只认严格空串，
+// 一条纯空白的密钥就会「显示为匿名、实际发出 Authorization: Bearer （空值）」并被上游判 401。
 //
 // 返回值：命中时为归一化后的文档页结果（同一文档文件的多段片段已聚合为一条）；
 // 上游 404 且 error 为 no_documentation_found 时返回空结果且 err == nil —— 这是「该问题没有库文档」
@@ -56,7 +68,7 @@ func (p *Context7Provider) Search(ctx context.Context, req model.SearchRequest, 
 	if err != nil {
 		return model.ProviderResponse{}, err
 	}
-	if key.Value != "" {
+	if strings.TrimSpace(key.Value) != "" {
 		request.Header.Set("Authorization", "Bearer "+key.Value)
 	}
 	response, err := p.client.Do(request)

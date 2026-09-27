@@ -10,6 +10,7 @@ type Provider interface {
 	Name() string
 	Search(ctx context.Context, req model.SearchRequest, key model.APIKey) (model.ProviderResponse, error)
 	HealthCheck(ctx context.Context, key model.APIKey) error
+	SupportsAnonymousKey() bool
 }
 
 type Factory func(Config) Provider

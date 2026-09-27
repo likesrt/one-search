@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -353,6 +354,105 @@ func TestKeenableProviderRequestBodyDefaults(t *testing.T) {
 				t.Fatalf("snippet_max_length = %#v, want %v", gotBody["snippet_max_length"], tc.wantSnippet)
 			}
 		})
+	}
+}
+
+// TestKeenableProviderAnonymousEndpoint 覆盖「空 key 即匿名」的两条路径差异：
+// 空 key 必须改打 /v1/search/public 并带 X-Keenable-Title 应用标识，且**不发 X-API-Key**
+// （实测空 X-API-Key 头与不带鉴权同样被上游判 401，发空头等于自废匿名）；
+// 非空 key 走 /v1/search + X-API-Key，且不带 X-Keenable-Title。
+// 两条路径的请求体必须逐字段一致：上游 public 端点接受同一份 body，差异只在端点与鉴权头。
+// 纯空白 key 与空串同组断言，用于确认判据与 security.MaskSecret 的空值口径同源（否则会被显示成匿名却走 keyed 路径）。
+func TestKeenableProviderAnonymousEndpoint(t *testing.T) {
+	cases := []struct {
+		name            string
+		key             model.APIKey
+		wantPath        string
+		wantAPIKey      string
+		wantTitleHeader string
+	}{
+		{name: "空 key 走 public 端点并带应用标识", key: model.APIKey{}, wantPath: "/v1/search/public", wantTitleHeader: "OneSearchRelay"},
+		{name: "纯空白 key 视为匿名", key: model.APIKey{Value: "   "}, wantPath: "/v1/search/public", wantTitleHeader: "OneSearchRelay"},
+		{name: "非空 key 走 keyed 端点并带 X-API-Key", key: model.APIKey{Value: "keenable-key"}, wantPath: "/v1/search", wantAPIKey: "keenable-key"},
+	}
+	// options 与 limit 刻意取得复杂一些，用来确认两条路径的 body 组装走的是同一段代码。
+	request := model.SearchRequest{
+		Query: "gateway",
+		Limit: 20,
+		Options: map[string]interface{}{
+			"mode":               "realtime",
+			"site":               "example.com",
+			"snippet_max_length": 500,
+			"published_after":    "2024-01-01",
+		},
+	}
+	bodies := map[string]map[string]interface{}{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			var gotAPIKey, gotTitle string
+			var gotBody map[string]interface{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				gotAPIKey = r.Header.Get("X-API-Key")
+				gotTitle = r.Header.Get("X-Keenable-Title")
+				_ = json.NewDecoder(r.Body).Decode(&gotBody)
+				writeJSON(t, w, map[string]interface{}{"results": []map[string]interface{}{}})
+			}))
+			defer server.Close()
+
+			provider := NewKeenableProvider(Config{BaseURL: server.URL})
+			if _, err := provider.Search(context.Background(), request, tc.key); err != nil {
+				t.Fatalf("Search returned error: %v", err)
+			}
+			if gotPath != tc.wantPath {
+				t.Fatalf("path = %q, want %q", gotPath, tc.wantPath)
+			}
+			if gotAPIKey != tc.wantAPIKey {
+				t.Fatalf("X-API-Key = %q, want %q", gotAPIKey, tc.wantAPIKey)
+			}
+			if gotTitle != tc.wantTitleHeader {
+				t.Fatalf("X-Keenable-Title = %q, want %q", gotTitle, tc.wantTitleHeader)
+			}
+			// 同一路径可能被多个用例覆盖（空串与纯空白），后写的值相同，这里保留最后一次即可。
+			bodies[tc.wantPath] = gotBody
+		})
+	}
+	// 两条路径的请求体必须一致：上游对 public 端点接受同一份 body，任何分叉都会让匿名与带 key
+	// 的调用结果口径不同，也会让「切到匿名只需留空 key」的承诺不成立。
+	keyed, anonymous := bodies["/v1/search"], bodies["/v1/search/public"]
+	if len(keyed) == 0 || len(anonymous) == 0 {
+		t.Fatalf("请求体未采集完整: keyed=%#v anonymous=%#v", keyed, anonymous)
+	}
+	if !reflect.DeepEqual(keyed, anonymous) {
+		t.Fatalf("两条路径请求体不一致: keyed=%#v anonymous=%#v", keyed, anonymous)
+	}
+}
+
+// TestProviderSupportsAnonymousKey 覆盖全部九家渠道的 SupportsAnonymousKey 取值：
+// 只有实测确认无密钥可用的 context7 与 keenable 返回 true，其余七家走 HTTPProvider 默认实现返回 false。
+// 该标志仅用于管理台提示，不参与放行判断，因此这里只断言「渠道级常量」的取值，
+// 并顺带确认未在 Registry 中注册的渠道名不会 panic。
+func TestProviderSupportsAnonymousKey(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider Provider
+		want     bool
+	}{
+		{name: model.ProviderContext7, provider: NewContext7Provider(Config{}), want: true},
+		{name: model.ProviderKeenable, provider: NewKeenableProvider(Config{}), want: true},
+		{name: model.ProviderExa, provider: NewExaProvider(Config{})},
+		{name: model.ProviderYou, provider: NewYouProvider(Config{})},
+		{name: model.ProviderJina, provider: NewJinaProvider(Config{})},
+		{name: model.ProviderTavily, provider: NewTavilyProvider(Config{})},
+		{name: model.ProviderFirecrawl, provider: NewFirecrawlProvider(Config{})},
+		{name: model.ProviderSerper, provider: NewSerperProvider(Config{})},
+		{name: model.ProviderBrave, provider: NewBraveProvider(Config{})},
+	}
+	for _, tc := range cases {
+		if got := tc.provider.SupportsAnonymousKey(); got != tc.want {
+			t.Fatalf("%s.SupportsAnonymousKey() = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

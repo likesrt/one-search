@@ -76,8 +76,18 @@ func TokenPrefix(token string) string {
 	return trimmed[:8]
 }
 
+// MaskSecret 生成密钥的脱敏展示串，用于列表页在不解密的前提下让用户辨认是哪把 key。
+//
+// 规则：纯空白（含空串）返回空串；去空白后长度 <= 8 返回 "****"；否则保留首尾各 4 个字符、中间替换为 "****"。
+// 空值之所以不返回 "****"，是因为脱敏不是校验：网关允许用空密钥条目表达「无密钥调用」，
+// 而 "****" 会让「匿名」与「已配置但看不清」在管理台上无法区分（两者进一步会落到不同的调用路径）。
+// 数据层同样以空串作为匿名判据，这里返回空串可让 key_hint 为空自然成立，无需额外标志位。
+// 参数 secret 允许为任意字符串（不做长度校验，超长值只截取首尾）；返回值恒非 nil，无副作用。
 func MaskSecret(secret string) string {
 	trimmed := strings.TrimSpace(secret)
+	if trimmed == "" {
+		return ""
+	}
 	if len(trimmed) <= 8 {
 		return "****"
 	}
