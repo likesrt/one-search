@@ -110,11 +110,12 @@
                     <el-button link :icon="Plus" :disabled="creatingRow" aria-label="添加密钥" @click="startCreateKey" />
                   </el-tooltip>
                 </div>
+                <p class="muted key-capability-hint">{{ anonymousKeyCapabilityText }}</p>
                 <div class="api-key-list">
                   <div v-for="row in tableKeys" :key="row.isNew ? 'new-key' : row.id" class="api-key-row" :class="{ 'is-new': row.isNew }">
                     <template v-if="row.isNew">
                       <div class="new-key-fields">
-                        <el-input v-model="draftKey" class="key-input" type="password" show-password placeholder="API Key" />
+                        <el-input v-model="draftKey" class="key-input" type="password" show-password :placeholder="draftKeyPlaceholder" />
                         <el-input
                           v-if="providerForm?.name === 'exa'"
                           v-model="draftExaServiceKey"
@@ -155,9 +156,13 @@
                       <div class="key-main">
                         <div class="key-title">
                           <span class="key-alias" :title="row.alias">{{ row.alias }}</span>
-                          <span class="key-hint-text">{{ row.key_hint || '已保存密钥' }}</span>
+                          <!-- 空 key_hint 即匿名条目（数据层不加字段，见 docs/admin-api-key.md）：
+                               此时不填「已保存密钥」那样的占位文案，改由下方 .key-meta-tag 统一标记，
+                               避免同一行里「匿名」出现两次造成视觉噪声。 -->
+                          <span class="key-hint-text">{{ row.key_hint }}</span>
                         </div>
                         <div class="key-meta">
+                          <span v-if="!row.key_hint" class="key-meta-tag">匿名</span>
                           <span>权重 {{ row.weight }}</span>
                           <span>成功 {{ row.total_successes }}</span>
                           <span>失败 {{ row.total_failures }}</span>
@@ -417,6 +422,18 @@ const providerCards = computed<ProviderCard[]>(() => providers.value.map((provid
 const selectedKeys = computed(() => providerForm.value ? keys.value.filter((item) => item.provider_name === providerForm.value?.name) : [])
 const tableKeys = computed<EditableKey[]>(() => creatingRow.value ? [{ id: 0, provider_id: 0, provider_name: providerForm.value?.name || '', alias: '', key_hint: '', exa_service_key_hint: '', status: 'enabled', weight: 1, rpm_limit: 0, daily_quota: 0, monthly_quota: 0, max_concurrency: 0, current_failures: 0, total_successes: 0, total_failures: 0, daily_used: 0, monthly_used: 0, official_quota_status: '', official_quota_message: '', official_quota_unit: '', created_at: '', updated_at: '', isNew: true }, ...selectedKeys.value] : selectedKeys.value)
 const dialogTitle = computed(() => providerForm.value ? `编辑 ${providerForm.value.display_name}` : '编辑平台')
+/**
+ * 当前渠道是否声明支持无密钥调用。
+ * 后端下发的是「渠道能力」而非放行开关：即便为 false 也允许创建匿名密钥
+ * （中转站等场景下仍可能可用），前端只据此调整提示与确认框。
+ */
+const currentProviderSupportsAnonymous = computed(() => providerForm.value?.supports_anonymous_key === true)
+const draftKeyPlaceholder = computed(() => currentProviderSupportsAnonymous.value
+  ? 'API Key（本渠道支持留空，留空即匿名调用）'
+  : 'API Key（留空将创建匿名密钥）')
+const anonymousKeyCapabilityText = computed(() => currentProviderSupportsAnonymous.value
+  ? '支持无密钥调用：留空即可创建匿名密钥，仍享受权重、代理、RPM 与配额设置。'
+  : '本渠道通常需要密钥；留空会创建一条匿名密钥，调用可能被上游拒绝。')
 const providerRequestLimit = computed({
   get() {
     const value = providerForm.value?.settings?.request_result_limit
@@ -850,10 +867,13 @@ function cancelCreateKey() {
 /**
  * 保存行内新建的密钥。base_url 与 proxy_url 都只在对应模式下有意义：
  * 非 custom 模式一律提交空串，避免在库里留下一条「切回 custom 就突然生效」的陈旧地址。
+ *
+ * 空密钥是合法输入（表达无密钥调用），因此不再硬拦截，只在渠道声明不支持匿名时弹一次确认，
+ * 由用户确认后照常提交 —— 中转站场景下未声明支持的渠道也可能实际可用，硬拦会挡掉合理配置。
  */
 async function createKey() {
   if (!providerForm.value) return
-  if (!draftKey.value.trim()) { ElMessage.warning('请填写平台密钥'); return }
+  if (!(await confirmAnonymousKey())) return
   const baseURL = draftKeyBaseURL.value.trim()
   const baseURLProblem = keyBaseURLError(baseURL)
   if (baseURLProblem) { ElMessage.warning(baseURLProblem); return }
@@ -866,6 +886,27 @@ async function createKey() {
     await load()
   } finally {
     creatingKey.value = false
+  }
+}
+
+/**
+ * 校验「空密钥」这一次提交是否可以继续：非空值、或渠道声明支持匿名时直接放行。
+ * 渠道未声明支持匿名时弹确认框，用户取消则中止提交（返回 false）。
+ * 由 createKey 在发起请求前调用，本身不写任何状态、不发请求。
+ * @returns 允许继续提交时为 true；用户取消或确认框抛错时为 false
+ */
+async function confirmAnonymousKey() {
+  if (draftKey.value.trim() || currentProviderSupportsAnonymous.value) return true
+  try {
+    await ElMessageBox.confirm('本渠道不支持无密钥调用，确定要创建匿名密钥吗？', '创建匿名密钥', {
+      type: 'warning',
+      confirmButtonText: '仍然创建',
+      cancelButtonText: '取消'
+    })
+    return true
+  } catch {
+    // ElMessageBox 在用户点取消时以 reject 结束，这里把「取消」当作正常分支而不是异常。
+    return false
   }
 }
 
@@ -1247,6 +1288,22 @@ onMounted(load)
   text-overflow: ellipsis;
   white-space: nowrap;
   flex-shrink: 0;
+}
+/* 匿名条目的标记：只有空密钥条目才有此 tag，随 .key-meta 一起显示。
+   用中性色而不是警告色 —— 匿名本身不是异常状态，只是「这条凭据没有密钥」，
+   是否需要担心由渠道级能力提示说明，这里只负责让条目一眼可辨。 */
+.key-meta-tag {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  line-height: 14px;
+}
+/* 渠道级匿名能力说明：一行小字，跟随 .muted 的低调基调，不喧宾夺主。 */
+.key-capability-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
 }
 .key-status-reason {
   display: inline-flex;

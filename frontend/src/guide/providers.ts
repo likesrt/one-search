@@ -3,11 +3,13 @@
  *
  * 覆盖范围：九家渠道的默认地址、认证头、端点与路径、结果数上限、支持的 Options 键、
  * 正文与 usage 的来源、官方额度查询方式与易错点；渠道级 settings 键全集；
- * key 级 base_url 覆盖与 `#` 完整端点语法；key 级代理三态；官方额度查询支持矩阵。
+ * key 级 base_url 覆盖与 `#` 完整端点语法；key 级代理三态；官方额度查询支持矩阵；
+ * 空密钥（匿名）条目的语义与支持匿名的渠道差异。
  *
  * 代码依据：
  * - `backend/internal/provider/exa.go`、`you.go`、`jina.go`、`tavily.go`、`firecrawl.go`、
- *   `serper.go`、`brave.go`、`keenable.go`、`context7.go`（各自拼装的请求体/查询参数与结果归一化）
+ *   `serper.go`、`brave.go`、`keenable.go`、`context7.go`（各自拼装的请求体/查询参数与结果归一化，
+ *   以及 `SupportsAnonymousKey` 的取值与 keenable 的匿名端点/请求头分支）
  * - `backend/internal/provider/helpers.go`（`requestLimit` 的 fallback/max、`usageMeasurements`、
  *   `optionString`/`optionInt`/`optionStringSlice`）
  * - `backend/internal/provider/errors.go`（`ClassifyHTTPError` 的错误类型判定）
@@ -44,7 +46,7 @@ export const providersChapter: DocChapter = {
             ['firecrawl', '`https://api.firecrawl.dev`', '`Authorization: Bearer`', '`POST /v2/search`', '100', '是'],
             ['serper', '`https://google.serper.dev`', '`X-API-KEY`', '`POST /search`', '100', '是'],
             ['brave', '`https://api.search.brave.com/res/v1`', '`X-Subscription-Token`', '`GET /web/search`', '20', '是'],
-            ['keenable', '`https://api.keenable.ai`', '`X-API-Key`', '`POST /v1/search`', '50', '是'],
+            ['keenable', '`https://api.keenable.ai`', '`X-API-Key`（为空时改走 `X-Keenable-Title`）', '`POST /v1/search`（为空时 `POST /v1/search/public`）', '50', '是'],
             ['context7', '`https://context7.com/api`', '`Authorization: Bearer`（可为空）', '`GET /v3/search`', '**不支持**', '是']
           ]
         },
@@ -162,7 +164,10 @@ export const providersChapter: DocChapter = {
         {
           type: 'list',
           items: [
-            '端点固定 `POST /v1/search`，鉴权头 `X-API-Key`（上游也接受 `Authorization: Bearer`，网关固定用前者）。无 key 的 public 端点没有接入。',
+            '端点按密钥是否为空二选一：密钥非空时 `POST /v1/search` + `X-API-Key`；**密钥为空（匿名条目）时改打 `POST /v1/search/public` 并带 `X-Keenable-Title: OneSearchRelay`**。两条路径的请求体完全一致，只有端点与请求头不同。',
+            '匿名路径**不会发送 `X-API-Key`**（连空头都不发）：实测带空 `X-API-Key` 头与完全不带鉴权同样被上游判为 401，因此匿名分支只写应用标识头。',
+            '`X-Keenable-Title` 是**应用标识而非凭据**（上游用于限流归因与来源识别），网关写死为 `OneSearchRelay`，**不提供配置项**；缺失该头时 public 端点返回 400 `Missing app identifier`。',
+            '**匿名额度不可控**：keyless 限流为 1000 次/小时、10 次/秒，**按 IP 且为共享池** —— 同一 IP 上的其它流量会占用该额度，余量不受网关控制；被限流时上游返回 429，网关按 `rate_limited` 处理。**keyless 不消耗 credits**，也不返回 usage 元数据。高频或关键场景建议配一条 Key。',
             '请求体含 `query`、`max_results`（`min(limit, 50)`，`limit` ≤ 0 时为 10）与 `mode`（取 `options.mode`，缺省 `pro`，另一档是 `realtime`；其它值一律回退成 `pro`，不会原样透传给上游）。',
             '支持的 `options` 键：`mode`、`site`、`acquired_after`（别名 `acquiredAfter`）、`acquired_before`（别名 `acquiredBefore`）、`published_after`（别名 `publishedAfter`）、`published_before`（别名 `publishedBefore`）、`query_time`（别名 `queryTime`）、`snippet_max_length`（别名 `snippetMaxLength`）。除 `mode` 与 `snippet_max_length` 外都是原样透传的字符串。',
             '`snippet_max_length` 会夹紧到 180 – 10000；未配置时**不发送该键**，以免用 0 覆盖上游默认值。',
@@ -185,7 +190,7 @@ export const providersChapter: DocChapter = {
         {
           type: 'list',
           items: [
-            '端点固定 `GET /v3/search`，鉴权头 `Authorization: Bearer ctx7sk...`；**认证头只在 `key.Value` 非空时才发送**，因此留空密钥也能尝试匿名调用（上游可能降级或拒绝）。建议还是配一条 Key，可从 https://context7.com/dashboard 免费申请。',
+            '端点固定 `GET /v3/search`，鉴权头 `Authorization: Bearer ctx7sk...`；**认证头只在 `key.Value` 非空时才发送**，因此留空密钥即匿名调用 —— 实测该端点不带 Authorization 同样返回 200 与正常的 `codeSnippets` / `infoSnippets`，而带**无效** key 反而返回 401 `invalid_api_key`，说明 key 是可选的配额增强而不是必需凭据。仍建议配一条 Key（可从 https://context7.com/dashboard 免费申请）以获得更高配额。',
             '**默认 base_url 是 `https://context7.com/api`**：端点 `/v3/search` 是适配器拼上去的，所以做 key 级地址覆盖时只写到 `/api`，不要连 `/v3/search` 一起写进 `base_url`。',
             '请求参数只有 `query`、`type=json` 与从 `options` 透传的 `library`（可重复，最多 4 个）/`version`/`language`。',
             '**不支持 `limit`**：上游不认这个参数，返回条数由上游决定，适配器拿到结果后在本地按请求的 `limit` 截断（`limit` ≤ 0 不截断）。这与 jina 同属一类，但截断行为在本地，不是完全不截。',
@@ -296,6 +301,30 @@ https://search.604020.xyz/tavily          → 拼接 → https://search.604020.x
             '端点自带查询串也没问题：GET 类渠道追加 `q=` 等参数时会用 `&` 连接，不会拼出两个 `?`。',
             '**Jina 不支持**：它的搜索词拼在 URL 路径里（`GET /{query}`），完整端点模式会丢掉路径，因此保存带 `#` 的 Jina 地址直接返回 400。',
             'key 级与渠道级 `base_url` 共用同一套解析，`#` 在两边都生效。'
+          ]
+        },
+        { type: 'heading', text: '空密钥（匿名）条目', level: 4 },
+        {
+          type: 'paragraph',
+          text: '**把密钥留空就是匿名调用**：网关不为此设渠道级开关，而是让「空密钥条目」本身承载匿名语义（`key_hint` 为空串即判据）。这样匿名调用天然复用 `provider_keys` 行上的全部既有能力 —— 权重与优先级、key 级代理三态、RPM / 日 / 月配额、key 级 `base_url` 覆盖、换 key 重试。'
+        },
+        {
+          type: 'table',
+          columns: ['渠道', '匿名时的实际行为', '`supports_anonymous_key`'],
+          rows: [
+            ['`context7`', '不带 `Authorization` 头打 `GET /v3/search`（实测 200，与带 key 结构一致）', '`true`'],
+            ['`keenable`', '改打 `POST /v1/search/public` 并带 `X-Keenable-Title: OneSearchRelay`；不发 `X-API-Key`', '`true`'],
+            ['其余七家', '照常发请求但不带凭据，上游返回 401（实测 exa / jina 如此），表现为 `auth` 失败', '`false`']
+          ]
+        },
+        {
+          type: 'list',
+          items: [
+            '`supports_anonymous_key` 由 `/api/admin/providers` 下发，**只用于管理台提示，不参与任何放行判断**：空密钥对所有渠道都放行。中转站等场景下，报告 `false` 的渠道也可能因自定义 `base_url` 实际可用，因此创建时只弹一次确认而不硬拦。',
+            '**匿名密钥不参与自动状态机**：失败时不会被自动置为 `disabled` / `exhausted` / `cooling`，但 `total_successes` / `total_failures` 照常累加。这是为了避免「探测性的空密钥被一次 auth 失败自我停用、而用户看不出原因」。',
+            '**同一渠道内匿名与真实密钥混用**不被禁止，两者同样参与权重轮询、可能被随机选中。建议一个渠道只保留一种，避免调用结果忽好忽坏。',
+            '只有一把匿名密钥时，`rate_limited` 的换 key 重试会重复取到同一条，等于没有重试；这是既有行为的自然结果，不额外处理。',
+            '点「查询官方额度」时匿名密钥走 default 分支返回 `supported: false`，不请求上游，无副作用。'
           ]
         },
         { type: 'heading', text: 'key 级代理的三态覆盖', level: 4 },

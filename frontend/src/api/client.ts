@@ -123,6 +123,12 @@ export interface ProviderConfig {
   timeout_ms: number
   settings?: Record<string, unknown>
   available_keys?: number
+  /**
+   * 该渠道无密钥时能否正常调用，由后端按适配器能力下发（不是数据库字段）。
+   * 仅用于管理台提示与创建匿名密钥时的确认框，不参与任何放行判断；
+   * 缺省或后端未填充时视为 false，即「未声明支持匿名」。
+   */
+  supports_anonymous_key?: boolean
 }
 
 export interface ProviderKey {
