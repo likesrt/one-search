@@ -142,7 +142,7 @@ curl "$BASE_URL/api/admin/dashboard" \
 | `GET` | `/api/admin/dashboard` | 可以 | 获取用量、Provider、Provider 健康度、30 天账单摘要。 |
 | `GET` | `/api/admin/providers` | 可以 | 获取 Provider 配置列表。 |
 | `GET` | `/api/admin/providers/health` | 可以 | 获取 Provider 健康状态。 |
-| `PATCH` | `/api/admin/providers/{name}` | 可以 | 更新 Provider 配置。`name` 为内置 Provider 名，例如 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`。 |
+| `PATCH` | `/api/admin/providers/{name}` | 可以 | 更新 Provider 配置。`name` 为内置 Provider 名，例如 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`、`context7`。 |
 | `GET` | `/api/admin/keys` | 可以 | 获取 Provider Key 列表，只返回脱敏信息。 |
 | `POST` | `/api/admin/keys` | 可以 | 创建 Provider Key。 |
 | `PATCH` | `/api/admin/keys/{id}` | 可以 | 更新 Provider Key。 |
@@ -379,10 +379,10 @@ curl -X POST "$BASE_URL/api/admin/keys" \
 
 | 字段 | 说明 |
 | --- | --- |
-| `provider_name` | 内置 Provider 名：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`。 |
+| `provider_name` | 内置 Provider 名：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`、`context7`。 |
 | `alias` | Key 别名。同一 Provider 下唯一。 |
 | `key` | 上游搜索 API Key，会加密存储。 |
-| `base_url` | 可选。该 Key 专属的基础 URL，留空则回退到该渠道（Provider）的 `base_url`。非空时必须是 `http://` 或 `https://` 开头的完整地址，否则返回 400。**覆盖值是整段替换根地址**：Brave 默认地址为 `https://api.search.brave.com/res/v1`，指向中转站时必须写成 `<host>/res/v1`，否则会 404；其余 7 家默认地址不含路径前缀。**以 `#` 开头表示该地址即完整端点**，网关不再拼接适配器自己的路径，例如 `#https://relay.example.com/proxy/tavily/search`；`#` 会被剥掉再校验，`#` 后仍需是合法的 http/https 绝对地址。Jina 的搜索词拼在 URL 路径中，保存带 `#` 的地址会返回 400。 |
+| `base_url` | 可选。该 Key 专属的基础 URL，留空则回退到该渠道（Provider）的 `base_url`。非空时必须是 `http://` 或 `https://` 开头的完整地址，否则返回 400。**覆盖值是整段替换根地址**：Brave 默认地址为 `https://api.search.brave.com/res/v1`，指向中转站时必须写成 `<host>/res/v1`，否则会 404；`context7` 默认地址为 `https://context7.com/api`（端点 `/v3/search` 由适配器拼接，不要写进 `base_url`）；其余渠道默认地址不含路径前缀。**以 `#` 开头表示该地址即完整端点**，网关不再拼接适配器自己的路径，例如 `#https://relay.example.com/proxy/tavily/search`；`#` 会被剥掉再校验，`#` 后仍需是合法的 http/https 绝对地址。Jina 的搜索词拼在 URL 路径中，保存带 `#` 的地址会返回 400。 |
 | `proxy_mode` | 可选。该 Key 的代理模式，取值 `inherit`（默认，跟随渠道级代理）、`direct`（强制直连，忽略渠道级代理）、`custom`（使用该 Key 自己的 `proxy_url`）。缺省或非法值按 `inherit` 处理。 |
 | `proxy_url` | 可选。仅 `custom` 模式生效的代理地址；地址为空时回退渠道级代理，而不是强制直连。未写协议头会自动补 `http://`，容器内会把 `127.0.0.1`/`localhost` 改写为 `host.docker.internal`。 |
 | `exa_api_key_id` | Exa 官方 usage 查询使用的 API Key ID。Exa 可选但建议填写。 |
@@ -489,6 +489,7 @@ curl -X POST "$BASE_URL/api/admin/keys/1/quota" \
 | `serper` | 本地累计用量估算 | Serper 未公开独立余额接口；按默认总额度 2500 credits 减本地累计 credits 估算剩余额度，不额外请求上游。 |
 | `brave` | `GET https://api.search.brave.com/res/v1/web/search` | Brave 通过 `X-RateLimit-*` 响应头返回剩余请求额度；查询本身会消耗一次成功请求。 |
 | `keenable` | 无官方额度接口 | 返回 `supported: false` 与「该渠道暂未配置官方额度查询」，不请求上游，也不参与自动刷新。 |
+| `context7` | 无官方额度接口 | 返回 `supported: false` 与「该渠道暂未配置官方额度查询」，不请求上游（上游没有账户额度查询端点），也不参与自动刷新。 |
 
 ### 5.8 创建外部 API Token
 
@@ -540,7 +541,7 @@ curl -X PATCH "$BASE_URL/api/admin/tokens/1" \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "client-a",
-    "allowed_providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable"],
+    "allowed_providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable", "context7"],
     "rate_limit_per_min": 120,
     "daily_quota": 2000,
     "monthly_quota": 60000
@@ -597,7 +598,7 @@ curl -X PUT "$BASE_URL/api/admin/settings" \
 | 字段 | 说明 |
 | --- | --- |
 | `default_mode` | 默认搜索模式：`parallel`、`fallback`、`single`。 |
-| `default_providers` | 默认 Provider 列表；新库初始化和默认 fallback 为 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`。 |
+| `default_providers` | 默认 Provider 列表；新库初始化和默认 fallback 为 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable` 八个通用搜索 Provider。**`context7` 是有意不放入默认列表的**：它是文档检索渠道，只应在显式传 `providers: ["context7"]` 时参与，因此升级到含 `context7` 的版本不会改变存量用户的默认搜索行为。需要让它参与默认路由时，把 `context7` 加进这个数组即可。 |
 | `default_limit` | 默认返回结果数，搜索时最大限制为 50。 |
 | `default_dedupe` | 是否默认去重。 |
 | `request_timeout_ms` | 单次搜索总超时。 |
@@ -666,7 +667,7 @@ curl -X POST "$BASE_URL/v1/search" \
   -H 'Content-Type: application/json' \
   -d '{
     "query": "latest web search APIs",
-    "providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable"],
+    "providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable", "context7"],
     "mode": "parallel",
     "limit": 10,
     "cache": "default",

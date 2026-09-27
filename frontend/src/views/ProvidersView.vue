@@ -489,7 +489,10 @@ const DEFAULT_PROVIDER_PRICING: Record<string, { price_per_request: number; pric
   jina: { price_per_request: 0.0005, price_per_credit: 0, price_per_token: 0.00000005, default_billable_credits: 0 },
   // Keenable 未公开按次单价（官方口径是「以响应为准」而响应不含 cost），
   // 因此给 0 —— 不产生费用估算比填一个假单价诚实，需要的话在渠道 settings 里覆盖。
-  keenable: { price_per_request: 0, price_per_credit: 0, price_per_token: 0, default_billable_credits: 0 }
+  keenable: { price_per_request: 0, price_per_credit: 0, price_per_token: 0, default_billable_credits: 0 },
+  // Context7 同样没有公开的按次单价（免费层 + 订阅制，官方不公布单次调用价），
+  // 因此四个字段都填 0，与 keenable 同口径 —— 填 0 比编一个假单价诚实，需要成本估算时在「计费」Tab 自填。
+  context7: { price_per_request: 0, price_per_credit: 0, price_per_token: 0, default_billable_credits: 0 }
 }
 
 function defaultPricingFor(name: string) {
@@ -513,7 +516,8 @@ const providerProxyURL = computed<string>({
 
 // key 级基础 URL 的填写说明按渠道区分：只有 Brave 的默认地址带路径前缀
 // （https://api.search.brave.com/res/v1），覆盖时必须写全否则 404；
-// 其余 7 家默认地址是纯 host，不需要这段警告。
+// 其余渠道默认地址不含路径前缀，不需要这段警告。context7 的默认地址虽带 /api，
+// 但通用文案里的「`#` 即完整端点」已覆盖中转站写法，故不单独加提示。
 const KEY_BASE_URL_HINT_BASE = '留空则使用渠道默认地址；以 # 开头表示该地址即完整端点，网关不再拼接自己的路径（例如 #https://api.tavily.com/search）'
 const KEY_BASE_URL_HINT_BRAVE = '留空则使用渠道默认地址；Brave 默认含 /res/v1 路径前缀，指向中转站时需写全，否则会 404。以 # 开头表示该地址即完整端点，网关不再拼接自己的路径'
 // 自定义地址意味着请求不走官方端点，而官方额度查询接口硬编码各家官方域名
@@ -610,7 +614,7 @@ const providerDefaultBillableCredits = computed<number>({
 })
 
 /**
- * 显示渠道卡片的短标识（Y/J/E/T/F/S/B/K）。
+ * 显示渠道卡片的短标识（Y/J/E/T/F/S/B/K/C）。
  * 未匹配到已知渠道时退化为名称首字母大写，因此新增渠道不写在这里也不会崩。
  * @param name 渠道名（provider.name）
  * @returns 单个大写字母
@@ -624,6 +628,7 @@ function providerShortName(name: string) {
   if (/serper/i.test(name)) return 'S'
   if (/brave/i.test(name)) return 'B'
   if (/keenable/i.test(name)) return 'K'
+  if (/context7/i.test(name)) return 'C'
   return (name || 'S').slice(0, 1).toUpperCase()
 }
 

@@ -93,13 +93,20 @@ Authorization: Bearer oak_xxx
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `query` | string | 是 | 搜索关键词。 |
-| `providers` | string[] | 否 | 限定 Provider：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`。为空时使用系统默认配置；新库初始化和默认 fallback 为这八个内置 Provider。 |
+| `providers` | string[] | 否 | 限定 Provider：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`、`context7`。为空时使用系统默认配置；新库初始化和默认 fallback 为前八个通用搜索 Provider（`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`）。 |
 | `mode` | string | 否 | `parallel`、`fallback`、`single`。 |
 | `limit` | number | 否 | 返回结果数，后端最大限制 50。**建议显式传 15**：渠道级 `request_result_limit` 大于 0 时，服务端会按该值逐渠道取数（与请求里的 `limit` 无关），最终合并结果再按 `limit` 截断。传得过小会让已经取回并计费的结果被丢弃。 |
 | `freshness` | string | 否 | 预留给 Provider 或兼容逻辑的时间新鲜度提示。 |
 | `dedupe` | boolean | 否 | 是否按 URL 去重。 |
 | `cache` | string | 否 | `default`、`bypass`、`refresh`。 |
 | `include_raw` | boolean | 否 | 是否在结果中包含上游原始条目。 |
+
+### 5.1 关于 `context7`（枚举九项 ≠ 默认路由九项）
+
+- 它是**文档检索渠道**，检索的是开源库/框架的结构化文档与可运行代码示例，而不是通用网页结果；适合「某个库、框架、SDK 或 API 怎么用」这类问题，对时事、非库类主题不适用。
+- 它**不在默认渠道列表内**（`default_providers` 仍是上面那八个），不显式传 `providers: ["context7"]` 就永远不会被调用。因此 `providers` 枚举有九个值、运行期默认路由仍是八个，这是有意设计，不是 bug。
+- 建议用法：涉及库文档的问题**先**显式传 `providers: ["context7"]`；如果结果为空（该库未被收录，上游返回 `404 no_documentation_found`，网关按空结果处理、不报错），**再**用默认渠道或其它渠道补充。MCP `initialize` 返回的 `instructions` 与 `providers` 的 schema 描述里都写了这段引导。
+- 需要先在管理台为它添加一条 `ctx7sk...` 密钥（可从 <https://context7.com/dashboard> 免费申请）；上游不认 `limit`，返回条数由适配器在本地按 `limit` 截断。
 
 返回结果：
 
@@ -228,7 +235,7 @@ curl -X POST "$BASE_URL/mcp" \
       "name": "search",
       "arguments": {
         "query": "latest web search APIs",
-        "providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable"],
+        "providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable", "context7"],
         "mode": "parallel",
         "limit": 5,
         "cache": "default"

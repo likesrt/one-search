@@ -2,7 +2,7 @@
 
 自托管 Web Search API 中转 / 聚合网关。
 
-统一接入 Exa、You.com、Jina、Tavily、Firecrawl、Serper、Brave、Keenable，提供：
+统一接入 Exa、You.com、Jina、Tavily、Firecrawl、Serper、Brave、Keenable，以及文档检索渠道 **Context7**（检索开源库/框架的权威文档与可运行代码示例，定位与其它通用网页搜索渠道不同，**不在默认渠道列表内**，需显式指定 `providers: ["context7"]`），提供：
 
 - 统一搜索接口 `POST /v1/search`（`parallel` / `fallback` / `single`）
 - 网页抓取接口 `GET|POST /v1/fetch`（HTML 转 Markdown、按字符数截断、可续读）

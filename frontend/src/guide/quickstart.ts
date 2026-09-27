@@ -51,7 +51,7 @@ export const quickstartChapter: DocChapter = {
           items: [
             {
               title: '进入「平台管理」',
-              text: '八家渠道（Exa / You.com / Jina / Tavily / Firecrawl / Serper / Brave Search / Keenable）以卡片形式列出。卡片右上角的开关控制渠道是否参与搜索，关掉的渠道即使被请求指定也会被跳过。'
+              text: '九家渠道（Exa / You.com / Jina / Tavily / Firecrawl / Serper / Brave Search / Keenable / Context7）以卡片形式列出。卡片右上角的开关控制渠道是否参与搜索，关掉的渠道即使被请求指定也会被跳过。其中 Context7 是文档检索渠道（查开源库/框架文档与代码示例），不在默认渠道列表内，需要显式指定 `providers: ["context7"]` 才会被调用。'
             },
             {
               title: '点击卡片进入配置弹窗',

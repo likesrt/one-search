@@ -424,7 +424,7 @@ export const consoleChapter: DocChapter = {
           rows: [
             ['默认模式', '`default_mode`', '并发聚合（`parallel`）'],
             ['汇总返回结果数', '`default_limit`', '10（最小 1）'],
-            ['默认平台', '`default_providers`', '全部八家'],
+            ['默认平台', '`default_providers`', '前八家通用搜索渠道（不含 `context7`）'],
             ['结果去重', '`default_dedupe`', '开'],
             ['平台路由策略', '`provider_routing_strategy`', '固定顺序（`fixed`）']
           ]

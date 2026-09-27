@@ -165,7 +165,7 @@ export const mcpChapter: DocChapter = {
           columns: ['入参', '类型', '约束'],
           rows: [
             ['`query`', 'string', '**必填**，裁剪空白后不能为空，否则 `-32602` `query is required`'],
-            ['`providers`', 'array', '枚举八家渠道'],
+            ['`providers`', 'array', '枚举**九家**渠道：`exa` / `you` / `jina` / `tavily` / `firecrawl` / `serper` / `brave` / `keenable` / `context7`。注意**枚举九项 ≠ 默认路由九项**：不传 `providers` 时走系统默认平台，出厂仍是前八家通用搜索渠道，`context7` 必须显式指定才会参与'],
             ['`mode`', 'string', '枚举 `parallel` / `fallback` / `single`'],
             ['`limit`', 'integer', 'schema 声明 `minimum: 1`、`maximum: 50`。**建议显式传 15**（`instructions` 与 schema 描述里都写明了这点）：渠道级 `request_result_limit` 大于 0 时会按该值逐渠道取数，传得过小会让已取回并计费的结果被丢弃。（`minimum`/`maximum` 是 schema 层声明，服务端编排仍按自己的规则处理）'],
             ['`freshness`', 'string', '自由文本'],
@@ -173,6 +173,12 @@ export const mcpChapter: DocChapter = {
             ['`cache`', 'string', '枚举 `default` / `bypass` / `refresh`'],
             ['`include_raw`', 'boolean', '结果里是否带 `raw`']
           ]
+        },
+        {
+          type: 'callout',
+          tone: 'info',
+          title: '涉及库/框架文档的问题优先显式指定 context7',
+          text: '`context7` 是文档检索渠道，返回的是开源库/框架的权威文档与可运行代码示例，与其余八家通用网页搜索定位不同。`initialize` 返回的 `instructions` 与 `providers` 的 schema 描述都引导模型：问题涉及某个库、框架、SDK 或 API 的用法时**先**显式传 `providers: ["context7"]`，若结果为空（该库未被收录）**再**用默认渠道或其它渠道补充。它只覆盖已收录的开源库文档，对通用网页问题、时事、非库类主题不适用。'
         },
         {
           type: 'callout',
