@@ -12,6 +12,7 @@ import (
 	"github.com/one-search/one-search/backend/internal/api"
 	"github.com/one-search/one-search/backend/internal/config"
 	"github.com/one-search/one-search/backend/internal/db"
+	"github.com/one-search/one-search/backend/internal/fetch"
 	"github.com/one-search/one-search/backend/internal/keypool"
 	"github.com/one-search/one-search/backend/internal/logging"
 	"github.com/one-search/one-search/backend/internal/model"
@@ -213,6 +214,17 @@ func enableFetch(handler *api.Handler, store *db.Store, log *logging.Logger) {
 	handler.EnableFetch(err != nil || settings.Enabled)
 }
 
+// startLogRetentionCleaner 启动日志保留清理任务，返回停止函数。
+//
+// 每小时执行一次 run()：清理过期日志与搜索缓存，并清扫网页抓取的本地文件缓存。
+//
+// 抓取缓存必须有一条与访问无关的清扫路径：一个抓取过之后再没人访问的 URL，
+// 其缓存文件永远不会被读到，也就永远不会被删除，长期运行下磁盘只涨不跌。
+// 这里刻意复用同一 ticker 与同一 goroutine，不新增生命周期管理。
+//
+// 参数 store 用于读取保留策略；log 用于记录失败。
+// 返回值：幂等的停止函数，由 main 在退出时调用。
+// 副作用：启动一个后台 goroutine；按保留策略删除日志、搜索缓存与抓取缓存文件。
 func startLogRetentionCleaner(store *db.Store, log *logging.Logger) func() {
 	stop := make(chan struct{})
 	run := func() {
@@ -231,6 +243,7 @@ func startLogRetentionCleaner(store *db.Store, log *logging.Logger) func() {
 		if err := store.DeleteExpiredCache(ctx); err != nil {
 			log.Error("cache_cleanup_failed", map[string]interface{}{"error": err.Error()})
 		}
+		cleanFetchCache(ctx, store, log)
 		if searchDeleted > 0 || auditDeleted > 0 {
 			log.Info("log_retention_cleanup", map[string]interface{}{"retention_days": settings.LogRetentionDays, "search_deleted": searchDeleted, "audit_deleted": auditDeleted})
 		}
@@ -249,4 +262,24 @@ func startLogRetentionCleaner(store *db.Store, log *logging.Logger) func() {
 		}
 	}()
 	return func() { close(stop) }
+}
+
+// cleanFetchCache 按当前抓取配置清扫本地文件缓存。
+//
+// 读配置失败时本轮直接跳过：TTL 与总量上限都来自配置，用零值代替会让所有条目
+// 被判定为已过期而整目录清空。宁可持续一小时不清理，也不能因为一次读库失败清掉全部缓存。
+// 这里刻意不在 main 里重复一份默认值，避免与 db 层的默认值各自漂移。
+//
+// 参数 ctx 用于读配置；log 用于记录失败。
+// 副作用：删除抓取缓存目录中已过期或超出总量上限的文件；失败只记日志。
+func cleanFetchCache(ctx context.Context, store *db.Store, log *logging.Logger) {
+	settings, err := store.FetchSettings(ctx)
+	if err != nil {
+		log.Error("fetch_cache_cleanup_skipped", map[string]interface{}{"error": err.Error()})
+		return
+	}
+	dir := fetch.DefaultCacheDir()
+	if err := fetch.CleanCache(dir, settings.CacheTTLSeconds, settings.CacheErrorTTLSeconds, settings.CacheMaxTotalBytes); err != nil {
+		log.Error("fetch_cache_cleanup_failed", map[string]interface{}{"dir": dir, "error": err.Error()})
+	}
 }

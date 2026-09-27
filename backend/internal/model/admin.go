@@ -107,6 +107,24 @@ type FetchSettings struct {
 	// TimeoutMS 是单次抓取的总体超时，上界 60000：deploy/nginx.conf 的
 	// proxy_read_timeout 是 65s，配得比它更长只会先被反代断开而对外表现为 504
 	TimeoutMS int `json:"timeout_ms"`
+	// FallbackEnabled 是 Tavily 兜底回退的总开关，默认 false：
+	// 开启后才会消耗按量付费的第三方额度，因此必须由管理员显式打开
+	FallbackEnabled bool `json:"fallback_enabled"`
+	// FallbackMinChars 是触发回退的可见文本长度阈值（按 rune 计，口径见
+	// fetch.visibleTextLength）。低于此值视为内容不可用，默认 80
+	FallbackMinChars int `json:"fallback_min_chars"`
+	// CacheTTLSeconds 是正常内容的缓存时长，0 表示关闭缓存（读路径与写路径同时关闭）
+	CacheTTLSeconds int `json:"cache_ttl_seconds"`
+	// CacheErrorTTLSeconds 是上游返回 401/403/429 时的短 TTL，
+	// 避免几分钟内反复撞同一道门禁，过期后自动重试
+	CacheErrorTTLSeconds int `json:"cache_error_ttl_seconds"`
+	// CacheMaxBytes 是单条缓存上限（字节），超过则不缓存该条
+	CacheMaxBytes int64 `json:"cache_max_bytes"`
+	// CacheMaxTotalBytes 是缓存目录总量上限（字节），超出时按 mtime 从旧到新淘汰
+	CacheMaxTotalBytes int64 `json:"cache_max_total_bytes"`
+	// MaxConcurrency 是单进程同时在飞的抓取上限（含内置抓取与回退），
+	// 超出的请求排队等待；它约束的是打向上游的并发，缓存命中不占名额
+	MaxConcurrency int `json:"max_concurrency"`
 }
 
 type SearchLog struct {
@@ -286,10 +304,10 @@ type ProviderUsagePoint struct {
 }
 
 type HealthSegmentPoint struct {
-	Status   string `json:"status"` // ok | degraded | down | off
-	Success  int64  `json:"success"`
-	Failed   int64  `json:"failed"`
-	Total    int64  `json:"total"`
+	Status  string `json:"status"` // ok | degraded | down | off
+	Success int64  `json:"success"`
+	Failed  int64  `json:"failed"`
+	Total   int64  `json:"total"`
 }
 
 type HealthSegmentSeries struct {

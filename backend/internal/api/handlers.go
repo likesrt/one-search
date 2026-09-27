@@ -43,6 +43,7 @@ type AppStore interface {
 	UpdateRuntimeSettings(ctx context.Context, settings model.RuntimeSettings) error
 	FetchSettings(ctx context.Context) (model.FetchSettings, error)
 	UpdateFetchSettings(ctx context.Context, settings model.FetchSettings) error
+	RecordFetchFallbackUsage(ctx context.Context, providerName string, providerKeyID int64, credits float64) error
 	ListSearchLogs(ctx context.Context, limit int) ([]model.SearchLog, error)
 	GetSearchLog(ctx context.Context, id int64) (model.SearchLog, []model.ProviderCallLog, error)
 	GetSearchLogByRequestID(ctx context.Context, requestID string) (model.SearchLog, []model.ProviderCallLog, error)

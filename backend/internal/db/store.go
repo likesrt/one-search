@@ -199,16 +199,16 @@ func (s *Store) UpdateRuntimeSettings(ctx context.Context, settings model.Runtim
 
 // FetchSettings 读取「网页抓取」功能配置（settings 表 key='fetch'）。
 //
-// 表里没有该行时返回功能内置默认值（启用、直连、不放行内网、30s 超时），
-// 因此新库无需迁移文件即可用。数值越界在此收敛：timeout_ms 落在 1..60000，
-// 与 api 层的展示约束一致，避免历史脏数据让前端显示一个不可保存的值。
+// 表里没有该行时返回功能内置默认值（启用、直连、不放行内网、30s 超时、回退关闭、
+// 阈值 80、缓存 120s/3MB/256MB、并发 32），因此新库无需迁移文件即可用。
+// 数值越界在此收敛，与 api 层的展示约束一致，避免历史脏数据让前端显示一个不可保存的值。
+//
+// 注意 enabled 与 timeout_ms 的既有行为逐字未变：前者按零值 false 处理（历史数据里
+// 该字段缺失时表现为关闭，与旧版一致），后者 <=0 取 30000、>60000 收敛到 60000。
 //
 // 返回值：配置结构与错误；仅查询失败（非「无此行」）时返回错误。
 func (s *Store) FetchSettings(ctx context.Context) (model.FetchSettings, error) {
-	settings := model.FetchSettings{
-		Enabled:   true,
-		TimeoutMS: 30000,
-	}
+	settings := defaultFetchSettings()
 	var payload []byte
 	err := s.pool.QueryRow(ctx, `SELECT value FROM settings WHERE key='fetch'`).Scan(&payload)
 	if err != nil {
@@ -221,20 +221,86 @@ func (s *Store) FetchSettings(ctx context.Context) (model.FetchSettings, error) 
 		return settings, err
 	}
 	settings.ProxyURL = strings.TrimSpace(settings.ProxyURL)
+	// timeout_ms 的收敛口径与历史一致：<=0 取默认 30000、>60000 收敛到上界 60000。
+	// 它与其他字段的「越界一律取默认值」不同，因此不并入 normalizeFetchSettings。
 	if settings.TimeoutMS <= 0 {
 		settings.TimeoutMS = 30000
 	}
 	if settings.TimeoutMS > 60000 {
 		settings.TimeoutMS = 60000
 	}
+	normalizeFetchSettings(&settings)
 	return settings, nil
+}
+
+// defaultFetchSettings 返回抓取功能的内置默认值。
+//
+// 默认值集中在一处是必需的：读路径（表里没有该行时）与写路径（越界值收敛）必须给出
+// 同一组数字，分散在两处会立刻出现「保存后与读到的不一致」这类难查的问题。
+// 其中 FallbackEnabled 默认 false 是有意的：回退会消耗按量付费的第三方额度。
+//
+// 无参数；返回值可直接使用或作为 json.Unmarshal 的初值（缺失字段保留默认值）。
+// 纯函数，无副作用。
+func defaultFetchSettings() model.FetchSettings {
+	return model.FetchSettings{
+		Enabled:              true,
+		TimeoutMS:            30000,
+		FallbackMinChars:     80,
+		CacheTTLSeconds:      120,
+		CacheErrorTTLSeconds: 120,
+		CacheMaxBytes:        3145728,   // 3 MiB
+		CacheMaxTotalBytes:   268435456, // 256 MiB
+		MaxConcurrency:       32,
+	}
+}
+
+// normalizeFetchSettings 就地收敛抓取配置的取值范围。
+//
+// 收敛口径是「非正取默认值、超上界收敛」：非正数几乎总是前端留空或历史脏数据，
+// 按默认值处理比按 0 处理安全（0 在缓存与并发上含义完全不同）。
+//
+// 刻意**不处理 timeout_ms**：它的既有口径是「>60000 收敛到 60000」而非「取默认 30000」，
+// 并入通用规则会静默改变已上线行为。调用方需自行先按原口径处理该字段。
+//
+// 副作用：原地修改入参。
+func normalizeFetchSettings(settings *model.FetchSettings) {
+	defaults := defaultFetchSettings()
+	if settings.FallbackMinChars <= 0 {
+		settings.FallbackMinChars = defaults.FallbackMinChars
+	}
+	// 缓存 TTL 允许为 0：那是「关闭缓存」的合法配置，因此只处理负数。
+	if settings.CacheTTLSeconds < 0 {
+		settings.CacheTTLSeconds = defaults.CacheTTLSeconds
+	}
+	if settings.CacheErrorTTLSeconds <= 0 {
+		settings.CacheErrorTTLSeconds = defaults.CacheErrorTTLSeconds
+	}
+	if settings.CacheMaxBytes <= 0 {
+		settings.CacheMaxBytes = defaults.CacheMaxBytes
+	}
+	if settings.CacheMaxTotalBytes <= 0 {
+		settings.CacheMaxTotalBytes = defaults.CacheMaxTotalBytes
+	}
+	if settings.MaxConcurrency <= 0 {
+		settings.MaxConcurrency = defaults.MaxConcurrency
+	}
+	// 并发上界 256：再高会让并发抓取把本机 fd 与目标站点同时打爆，
+	// 真要更高吞吐应提升 fetch 包的 MaxConnsPerHost，而不是无限放开这一项。
+	if settings.MaxConcurrency > 256 {
+		settings.MaxConcurrency = 256
+	}
+	// 阈值上界 10000：正常页面正文远超此值，再高的阈值只会让回退变成「几乎总是触发」。
+	if settings.FallbackMinChars > 10000 {
+		settings.FallbackMinChars = 10000
+	}
 }
 
 // UpdateFetchSettings 覆盖保存「网页抓取」功能配置（settings 表 key='fetch'）。
 //
 // 参数 settings 的字段全部按传入值落库，调用方（api 层）负责参数校验；
-// timeout_ms 非正或超过 60000 时在此收敛为默认 30000 / 上界 60000，
-// 使直接调用 store 的路径也不会写出让反代先超时的值。
+// 越界值在此收敛——timeout_ms 按「非正或超 60000 都取默认 30000」的既有口径处理，
+// 其余字段按 normalizeFetchSettings 的规则处理，使直接调用 store 的路径
+// 也不会写出让反代先超时的 timeout_ms 或非法的并发上限。
 //
 // 副作用：写入 settings 表并刷新 updated_at。
 // 返回值：仅写入或序列化失败时返回错误。
@@ -243,6 +309,7 @@ func (s *Store) UpdateFetchSettings(ctx context.Context, settings model.FetchSet
 	if settings.TimeoutMS <= 0 || settings.TimeoutMS > 60000 {
 		settings.TimeoutMS = 30000
 	}
+	normalizeFetchSettings(&settings)
 	payload, err := json.Marshal(settings)
 	if err != nil {
 		return err
@@ -251,6 +318,38 @@ func (s *Store) UpdateFetchSettings(ctx context.Context, settings model.FetchSet
 		INSERT INTO settings (key, value, updated_at) VALUES ('fetch', $1::jsonb, now())
 		ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()
 	`, string(payload))
+	return err
+}
+
+// RecordFetchFallbackUsage 把一次抓取回退消耗的 credits 累加进 usage_meter_daily。
+//
+// 只写 unit='credits' 一行，不写 search_requests / provider_calls：抓取不是搜索，
+// 那两张表的 query/mode 等字段是 NOT NULL 且语义不匹配，塞进去会污染搜索侧的统计与展示。
+// api_token_id 传 NULL：抓取端点的调用方令牌不容易传到这一层，而按 key 与渠道聚合
+// 已足够回答「回退烧了多少额度」。
+//
+// 参数：
+//   - providerName：渠道名（抓取固定为 tavily），空串时直接返回 nil，避免写出无法归属的记录；
+//   - providerKeyID：本次使用的密钥 ID，<=0 时写 NULL（未落库的临时 key 不参与按 key 聚合）；
+//   - credits：本次消耗的额度，<=0 时直接返回 nil（失败不计费，实测 Tavily 对失败请求计 0）。
+//
+// 副作用：写 usage_meter_daily 一行（同日同维度时累加）。
+// 返回值：仅数据库写入失败时返回错误。
+func (s *Store) RecordFetchFallbackUsage(ctx context.Context, providerName string, providerKeyID int64, credits float64) error {
+	name := strings.TrimSpace(providerName)
+	if name == "" || credits <= 0 {
+		return nil
+	}
+	var keyID interface{}
+	if providerKeyID > 0 {
+		keyID = providerKeyID
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO usage_meter_daily (usage_date, api_token_id, provider_key_id, provider_name, unit, quantity_total, cost_usd_total)
+		VALUES (CURRENT_DATE, NULL, $1, $2, 'credits', $3, 0)
+		ON CONFLICT (usage_date, api_token_id, provider_key_id, provider_name, unit) DO UPDATE SET
+		quantity_total=usage_meter_daily.quantity_total+$3
+	`, keyID, name, credits)
 	return err
 }
 
