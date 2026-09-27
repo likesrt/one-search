@@ -122,7 +122,7 @@ Authorization: Bearer oak_xxx
 `allowed_providers` 之外的 RPM、日/月额度限制同样生效（`allowed_providers` 本身不影响抓取）。
 
 抓取是**本功能自有的全局配置**（管理台「网页抓取」页）：开关、代理地址、是否放行内网目标、
-超时。**不接受请求级代理参数** —— 允许客户端指定任意代理等于把服务变成内网跳板。
+超时、回退与缓存。**不接受请求级代理参数** —— 允许客户端指定任意代理等于把服务变成内网跳板。
 
 输入参数：
 
@@ -144,7 +144,32 @@ Authorization: Bearer oak_xxx
 - 抓取工具**不返回 `structuredContent`**（与 `search` 不同）：内容本身就是纯文本，
   包装成结构化字段没有额外信息。
 
-### 6.1 fetch 与浏览器 `fetch failed` 不是一回事
+### 6.1 回退与缓存
+
+管理台「网页抓取」页可开启 **Tavily 回退兜底**（默认关闭，因为会按量消耗第三方额度）。
+开启后，内置抓取在下列任一情况会改用 Tavily 的 `POST /extract` 取回整页正文：
+
+- 传输层失败（连不上、超时、DNS/TLS 失败）；
+- 上游返回 `401`、`403` 或 `429`（门禁页、Cloudflare 质询、限流）；
+- 正文**可见文本**少于 `fallback_min_chars`（默认 80 字符）。可见文本已剥掉
+  Markdown 图片与链接目标 —— 有些质询页原始 1000 多字符里绝大多数是 base64 内联图片。
+
+`404` 与全部 `5xx` **不触发回退**：对端服务端问题重试无意义，也不该消耗第三方额度。
+以下四种请求同样不回退：被 SSRF 护栏拦截的内网目标、非 `GET` 或带 body 的请求、
+带自定义 `headers` 的请求（可能是 Authorization / Cookie，不得外发给第三方）、
+以及 `raw=true`（其契约是「原样返回源文本」，Markdown 无法替代）。
+
+回退成功时响应的 `status_code` 为 `200`、内容为整页 Markdown；**回退失败不会让请求失败** ——
+此时返回的是内置抓取的结果（哪怕是 403 页面）。回退走 Tavily 自己的 key 级与渠道级代理
+配置，抓取功能的全局代理不作用于它。
+
+**缓存**（`cache_ttl_seconds`，默认 120 秒，`0` 表示关闭）让同一 URL 在窗口内直接返回上次结果，
+不再打上游，因此**窗口内看不到页面更新**。缓存键包含 `url | method | body | headers | raw`，
+不同的 POST body 或不同的请求头不会互相污染；`start_index` 续读也从同一份缓存内容本地切片，
+零网络请求。上游返回 `401/403/429` 的结果同样会被缓存（用 `cache_error_ttl_seconds`），
+避免几分钟内反复撞同一道门禁。缓存存放在容器内 `/app/data/fetch-cache`，**不跨容器重启保留**。
+
+### 6.2 fetch 与浏览器 `fetch failed` 不是一回事
 
 工具名叫 `fetch`，文档里也常见原生 `fetch failed` 这类网络报错文案，两者无关：
 
@@ -152,15 +177,18 @@ Authorization: Bearer oak_xxx
 - **`fetch failed`**：MCP 客户端（如 LobeHub）用浏览器/Node 的 `fetch` 连不上 MCP 端点时的报错，
   属于客户端到服务端的连接问题，见 10.2 的排错清单。
 
-### 6.2 能力边界
+### 6.3 能力边界
 
 - **不执行 JavaScript**：纯客户端渲染（CSR）的 SPA 抓回来是空内容，被 Cloudflare 等主动
   质询页拦截的站点只会拿到质询页本身。结果为空不是报错，先用 `raw=true` 看服务实际收到了什么。
+  开启 Tavily 回退后，这类站点中的多数可由回退通道救回（见 6.1）。
 - **不保持会话**：不保存 Cookie，需要完成登录流程的页面无法访问。显式通过 `headers`
-  传凭据可用。
+  传凭据可用；但带自定义 `headers` 的请求不会走回退（凭据不得外发给第三方）。
 - **不解析 `robots.txt`**：合规由调用方自行保证。
 - **不写搜索日志**：抓取不会出现在「请求日志」页（那是搜索形状的日志表），
-  只在服务端访问日志里留下 `fetch_done` / `fetch_failed` 记录。
+  只在服务端访问日志里留下 `fetch_done` / `fetch_failed` / `fetch_fallback_done` /
+  `fetch_fallback_failed` / `fetch_fallback_no_key` 记录。`fetch_done` 里的 `channel`
+  字段标明本次内容来自内置抓取还是回退。
 
 ## 7. 调用示例
 

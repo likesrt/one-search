@@ -69,7 +69,7 @@ curl -X POST http://localhost:5173/v1/search \
 | `/` | 管理台 |
 | `/healthz` | 健康检查 |
 | `/v1/search` | 统一搜索 |
-| `/v1/fetch` | 网页抓取（`GET` 调试用 / `POST` 完整能力） |
+| `/v1/fetch` | 网页抓取（`GET` 调试用 / `POST` 完整能力，含 Tavily 回退与本地缓存） |
 | `/v1/compat/tavily/search` | Tavily 兼容 |
 | `/v1/compat/serper/search` | Serper 兼容 |
 | `/v1/compat/openai/responses-search` | OpenAI 兼容 |
@@ -161,10 +161,36 @@ enabled_tools = ["search", "fetch"]
 
 公网请在前面加 HTTPS 反代，转发 `/`、`/api/`、`/v1/`、`/healthz`（以及 `/mcp`）。
 
-网页抓取的开关、代理与超时不在 `.env` 里，而是管理台「网页抓取」页的运行期配置（存 `settings` 表，
-key `fetch`）：`enabled`（默认开启，关闭后 `/v1/fetch` 返回 404 且 MCP 不再列出 `fetch`）、
-`proxy_url`（默认空，即直连）、`allow_private`（默认关闭，放行内网目标仅限可信内网）、
-`timeout_ms`（默认 30000，上界 60000）。
+网页抓取的配置不在 `.env` 里，而是管理台「网页抓取」页的运行期配置（存 `settings` 表，
+key `fetch`）：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 关闭后 `/v1/fetch` 返回 404 且 MCP 不再列出 `fetch` |
+| `proxy_url` | 空 | 空 = 直连；容器部署时 `127.0.0.1` / `localhost` 会自动改写为 `host.docker.internal` |
+| `allow_private` | `false` | 放行内网目标，仅限可信内网；开启等于关闭 SSRF 防护 |
+| `timeout_ms` | `30000` | 单次抓取总超时，上界 `60000` |
+| `fallback_enabled` | `false` | 开启后内置抓取失败/被拦截/内容过少时改用 Tavily extract，**按量消耗第三方额度** |
+| `fallback_min_chars` | `80` | 可见文本低于此值触发回退（Markdown 图片与链接目标不计入） |
+| `cache_ttl_seconds` | `120` | 正常内容的缓存时长，`0` = 关闭缓存 |
+| `cache_error_ttl_seconds` | `120` | 上游 `401/403/429` 时的缓存时长 |
+| `cache_max_bytes` | `3145728` | 单条缓存上限（3MiB），超过则不缓存该条 |
+| `cache_max_total_bytes` | `268435456` | 缓存目录总量上限（256MiB），超出按 mtime 删旧 |
+| `max_concurrency` | `32` | 单进程同时在飞的抓取上限，超出的排队等待 |
+
+**回退**（`fallback_enabled`）只在以下三种情况触发：内置抓取传输层失败、
+上游返回 `401/403/429`、正文可见文本少于阈值。`404` 与全部 `5xx` **不触发** ——
+那是对端服务端问题，重试无意义也不该消耗第三方额度。四道闸门会拦住不该外发的请求：
+被 SSRF 护栏拦截的内网目标、非 `GET` 或带 body 的请求、带自定义 `headers` 的请求
+（可能是 Authorization / Cookie）、以及 `raw=true`（契约是原样返回源文本，
+Markdown 无法替代）。**回退失败不会把请求变成 502**，而是返回内置抓取的结果。
+回退走 Tavily 自己的 key 级与渠道级代理，抓取功能的全局 `proxy_url` 不作用于它。
+
+**缓存**落在容器内 `/app/data/fetch-cache`（可用环境变量 `FETCH_CACHE_DIR` 覆盖），
+不跨容器重启保留。缓存键含 `url | method | body | headers | raw`，
+因此带 body 的 POST 与带认证头的请求不会互相污染。命中的请求不再打上游，
+`start_index` 续读也从同一份缓存内容本地切片。清理由日志保留任务每小时执行一次：
+先删过期条目，再按文件修改时间从旧到新删到总量上限以下。
 
 ## 本地开发
 

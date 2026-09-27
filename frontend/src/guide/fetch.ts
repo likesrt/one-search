@@ -5,8 +5,10 @@
  * MCP 的 `fetch` 工具、安全边界（SSRF 防护与代理策略）与已知能力边界。
  *
  * 代码依据：
- * - `backend/internal/fetch/`（抓取执行体：参数校验、SSRF 拨号护栏、渲染、截断）
- * - `backend/internal/api/fetch.go`（REST 与管理台端点、状态码映射、日志与审计）
+ * - `backend/internal/fetch/`（抓取执行体：参数校验、SSRF 拨号护栏、渲染、截断、缓存、并发闸门、回退判定）
+ * - `backend/internal/provider/tavily.go`（回退通道的 `POST /extract` 适配器）
+ * - `backend/internal/search/orchestrator.go`（`TavilyExtract`：回退复用 key 池与渠道代理）
+ * - `backend/internal/api/fetch.go`（REST 与管理台端点、状态码映射、日志与审计、回退接线）
  * - `backend/internal/api/mcp.go`（`fetch` 工具的清单过滤与调用分发）
  * - `backend/internal/model/admin.go`（`FetchSettings` 字段与默认值）
  * - `frontend/src/views/FetchView.vue`（管理台页面行为）
@@ -102,11 +104,16 @@ export const fetchChapter: DocChapter = {
   "method": "GET",
   "status_code": 200,
   "content_type": "text/html; charset=UTF-8",
+  "channel": "direct",
   "content": "# Example Domain\\n\\n...",
   "truncated": true,
   "next_start_index": 3000,
   "total_length": 8421
 }`
+        },
+        {
+          type: 'paragraph',
+          text: '`channel` 标明内容来自哪条通道：`direct` 是内置抓取，`tavily` 是回退兜底（此时 `status_code` 恒为 `200`、`content_type` 为 `text/markdown`）。'
         },
         {
           type: 'table',
@@ -183,7 +190,14 @@ export const fetchChapter: DocChapter = {
             ['`enabled`', '`true`', '关闭后 `/v1/fetch` 返回 404，MCP 的工具清单也不再列出 `fetch`'],
             ['`proxy_url`', '空', '空 = 直连。可填 `http://`、`https://`、`socks5://`。容器部署时 `127.0.0.1` / `localhost` 会被自动改写为 `host.docker.internal`'],
             ['`allow_private`', '`false`', '放行内网与环回目标。仅限完全可信的内网部署'],
-            ['`timeout_ms`', '`30000`', '单次抓取总超时（含重定向链），上界 `60000`']
+            ['`timeout_ms`', '`30000`', '单次抓取总超时（含重定向链），上界 `60000`'],
+            ['`fallback_enabled`', '`false`', '开启后内置抓取失败时改用 Tavily 取回正文，**按量消耗第三方额度**'],
+            ['`fallback_min_chars`', '`80`', '可见文本低于此值才回退。可见文本已剥离 Markdown 图片与链接目标'],
+            ['`cache_ttl_seconds`', '`120`', '同一 URL 的缓存时长，`0` = 关闭缓存'],
+            ['`cache_error_ttl_seconds`', '`120`', '上游返回 `401/403/429` 时的缓存时长'],
+            ['`cache_max_bytes`', '`3145728`', '单条缓存上限（3MiB），超过则不缓存该条'],
+            ['`cache_max_total_bytes`', '`268435456`', '缓存目录总量上限（256MiB），超出按修改时间删旧'],
+            ['`max_concurrency`', '`32`', '单进程同时在飞的抓取上限，超出的排队等待']
           ]
         },
         {
@@ -198,8 +212,83 @@ export const fetchChapter: DocChapter = {
           items: [
             '代理地址由管理员配置，**视为可信**：拨号层会放行「目标是该代理主机」的连接，因此用本地代理（`127.0.0.1:7890`）不需要关掉 SSRF 防护。',
             '**内网目标仍然被拦截**：`127.0.0.1`、`10.x`、`192.168.x`、`169.254.169.254` 等一律拒绝，除非显式打开 `allow_private`。',
-            '代理主机名（如 `host.docker.internal`）在服务端启动后首次构建抓取客户端时解析一次；解析失败按「无代理」处理并记日志——宁可直连失败，也不放开一个不确定的放行名单。'
+            '代理主机名（如 `host.docker.internal`）在服务端启动后首次构建抓取客户端时解析一次；解析失败按「无代理」处理并记日志——宁可直连失败，也不放开一个不确定的放行名单。',
+            '**抓取代理不作用于回退通道**：Tavily 走它自己的 key 级与渠道级代理配置。抓取代理是给「抓取任意 URL」这个危险动作准备的出口，不应顺带改变调用第三方 API 的出站路径。'
           ]
+        }
+      ]
+    },
+    {
+      id: 'fetch-fallback-cache',
+      title: '回退与缓存',
+      blocks: [
+        {
+          type: 'paragraph',
+          text: '内置抓取是纯 HTTP 请求加本地 HTML 转 Markdown，不执行 JavaScript。这对付不了两类站点：客户端渲染的 SPA（抓回来是个空壳），以及 Cloudflare 之类的主动质询页（抓回来是「Just a moment...」）。**回退**就是为这两类站点准备的兜底：内置抓取不成时，改用 Tavily 的 `extract` 接口取回整页正文。'
+        },
+        { type: 'heading', text: '什么时候会触发回退', level: 4 },
+        {
+          type: 'list',
+          items: [
+            '**传输层失败**：连不上、超时、DNS 失败、TLS 失败。',
+            '**上游返回 `401`、`403` 或 `429`**：门禁页、质询页、限流页。',
+            '**正文可见文本少于阈值**（`fallback_min_chars`，默认 80 字符）。这里比较的是**可见文本**而非原始长度：有些质询页原始一千多字符，其中绝大多数是 base64 内联图片，按原始长度看很「健康」，实际正文只有几十字。'
+          ]
+        },
+        {
+          type: 'callout',
+          tone: 'info',
+          title: '`404` 与全部 `5xx` 不触发回退',
+          text: '对端明确说「资源不存在」或「我这边出错了」，重试没有意义，也不该为此消耗第三方额度。代价是：少数用 `404`/`410` 返回空壳的 SPA 站点救不回来。'
+        },
+        { type: 'heading', text: '四道闸门：这些请求不会外发', level: 4 },
+        {
+          type: 'list',
+          items: [
+            '**内网目标**（被 SSRF 防护拦截的地址）：把内网 URL 发给第三方，等于让 SSRF 护栏形同虚设。',
+            '**非 `GET` 或带 body 的请求**：`extract` 只能 `GET`，重放 `POST` 可能产生副作用。',
+            '**带自定义 `headers` 的请求**：其中可能是 `Authorization` 或 `Cookie`，转发出去等于泄露调用方凭据。',
+            '**`raw=true` 的请求**：raw 的契约是「原样返回源文本」，而 Tavily 只出 Markdown，回退会静默改变语义。'
+          ]
+        },
+        {
+          type: 'callout',
+          tone: 'warn',
+          title: '开启回退会消耗按量付费的额度',
+          text: '这就是它默认关闭的原因。Tavily 按次计费（basic 档 1–5 个 URL 算 1 个 credit），失败与命中服务端缓存都不计费，所以失败重试不会烧钱。每次成功回退的用量会记进用量表（`unit=credits`），可在仪表盘核对。'
+        },
+        { type: 'heading', text: '回退失败不会让请求失败', level: 4 },
+        {
+          type: 'paragraph',
+          text: '回退是加分项，不是必要条件。取不到可用的 Tavily 密钥、通道超时、上游报错时，返回的仍是**内置抓取的结果**（哪怕是一张 403 页面），而不是把整个请求变成 502。返回结果里的 `channel` 字段标明内容来自哪条通道：`direct`（内置抓取）或 `tavily`（回退）。回退成功时 `status_code` 为 `200`、`content_type` 为 `text/markdown`。'
+        },
+        { type: 'heading', text: '缓存：别把目标站点打成限流', level: 4 },
+        {
+          type: 'paragraph',
+          text: '同一 URL 短时间内被反复抓取，既慢又容易把对端打成 `401/403/429`。缓存把结果落在服务端本地文件里，窗口内（`cache_ttl_seconds`，默认 120 秒）的重复请求直接返回上次内容，不再打上游。'
+        },
+        {
+          type: 'list',
+          items: [
+            '**缓存键含 `url | method | body | headers | raw`**：带不同 body 的 POST、带认证头的请求、以及 `raw=true` 的请求各有各的缓存，不会互相污染。',
+            '**续读零请求**：缓存存的是**完整内容**（不是截断后的片段），因此 `start_index` 续读直接从同一份内容切片，`total_length` 与首次完全一致。',
+            '**错误态同样缓存**：上游返回 `401/403/429` 的结果用 `cache_error_ttl_seconds` 缓存，避免几分钟内反复撞同一道门禁。',
+            '**传输层失败不写缓存**：一次 DNS 抖动或超时若被缓存，会让一个本来正常的 URL 在窗口内持续失败。',
+            '**`cache_ttl_seconds = 0` 关闭缓存**：每次请求都真实发起网络抓取。',
+            '**容量有上限**：单条超过 `cache_max_bytes` 不缓存；目录总量超过 `cache_max_total_bytes` 时按文件修改时间从旧到新淘汰。清理由服务端每小时的日志保留任务执行，与访问无关。',
+            '**不跨容器重启保留**：缓存在容器内 `/app/data/fetch-cache`，重建容器即清空——缓存本就是可以随时丢弃的数据。'
+          ]
+        },
+        {
+          type: 'callout',
+          tone: 'info',
+          title: '缓存会让内容滞后',
+          text: '窗口内页面更新看不到，这是缓存的固有代价。对时效性强的页面，把 `cache_ttl_seconds` 调小或临时设为 0。'
+        },
+        { type: 'heading', text: '并发上限', level: 4 },
+        {
+          type: 'paragraph',
+          text: '`max_concurrency`（默认 32）限制单进程**同时在飞**的抓取数，超出部分排队等待。它与缓存互补：缓存挡「之后的」重复请求，并发上限挡「同时的」请求，服务端还会按缓存键把同一 URL 的并发首次抓取合并成一次上游请求。注意名额护的是**打向上游的并发**，缓存命中不占名额。'
         }
       ]
     },
@@ -236,18 +325,20 @@ export const fetchChapter: DocChapter = {
             '响应体最多读取 10 MiB，超出部分丢弃——对外服务不能假定对端返回的体积合理。',
             '最多跟随 10 次重定向，避免被超长重定向链拖住连接。',
             '单次抓取有总超时兜底（默认 30s），请求体上限 1 MiB。',
-            '截断按 Unicode 码点进行，中文与 emoji 不会被切成两半。'
+            '截断按 Unicode 码点进行，中文与 emoji 不会被切成两半。',
+            '`max_concurrency`（默认 32）限制同时在飞的上游抓取数，超出的请求排队等待；同一个 URL 的并发首次抓取会被合并成一次上游请求。',
+            '结果缓存到本地文件（默认 120 秒），减少对同一站点的重复请求；详见「回退与缓存」小节。'
           ]
         },
         { type: 'heading', text: '能力边界', level: 4 },
         {
           type: 'list',
           items: [
-            '不执行 JavaScript：纯客户端渲染（CSR）的 SPA 抓回来内容极短或为空；被 Cloudflare 等主动质询页拦截的站点只会拿到质询页本身。',
-            '不保存 Cookie：需要完成登录流程的页面无法访问。显式通过 `headers` 传凭据可用。',
+            '不执行 JavaScript：纯客户端渲染（CSR）的 SPA 抓回来内容极短或为空；被 Cloudflare 等主动质询页拦截的站点只会拿到质询页本身。开启 Tavily 回退后，这类站点中的多数可由回退通道救回。',
+            '不保存 Cookie：需要完成登录流程的页面无法访问。显式通过 `headers` 传凭据可用；但带自定义 `headers` 的请求不会走回退（凭据不得外发给第三方）。',
             '不解析 `robots.txt`：合规由使用者自行保证。',
             '不做无头浏览器：要渲染 JS 需内嵌 Chromium，体积与资源占用是另一个量级，不在本项目范围内。',
-            '不缓存：每次请求都真实发起网络抓取，高频抓取同一地址会在对端产生真实流量。',
+            '回退通道只做兜底，不做正文提取：它返回的是**整页 Markdown**（导航与页脚都在），内容质量不如内置抓取，因此只在后者失败时使用，不做交替路由。',
             '非 UTF-8 编码（GBK / Big5 等）页面会显示为乱码：标准库只内置 UTF-8 解码器。这类页面用 `raw=true` 取原始内容自行解码。'
           ]
         },
