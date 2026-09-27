@@ -356,11 +356,22 @@ export const api = {
   queryKeyQuota: (id: number, payload: Record<string, unknown> = {}) => apiFetch<OfficialQuotaResult>('/api/admin/keys/' + id + '/quota', { method: 'POST', body: JSON.stringify(payload) }),
   tokens: () => apiFetch<{ tokens: ApiToken[] }>('/api/admin/tokens'),
   createToken: (payload: Record<string, unknown>) => apiFetch<{ token: ApiToken; raw_token: string }>('/api/admin/tokens', { method: 'POST', body: JSON.stringify(payload) }),
+  /**
+   * 读取单条令牌的明文，用于管理台随时复制。
+   * 明文在服务端加密留存，此处按需解密；失败原因（不存在 / 明文未留存）由后端以
+   * 404 / 409 区分，错误信息可直接展示给用户。每次调用都会写入审计日志。
+   */
+  revealToken: (id: number) => apiFetch<{ id: number; name: string; token_prefix: string; token: string }>('/api/admin/tokens/' + id + '/secret'),
   updateToken: (id: number, payload: Record<string, unknown>) => apiFetch('/api/admin/tokens/' + id, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteToken: (id: number) => apiFetch('/api/admin/tokens/' + id, { method: 'DELETE' }),
   settings: () => apiFetch<RuntimeSettings>('/api/admin/settings'),
   updateSettings: (payload: RuntimeSettings) => apiFetch<RuntimeSettings>('/api/admin/settings', { method: 'PUT', body: JSON.stringify(payload) }),
   adminAPIKey: () => apiFetch<AdminAPIKey>('/api/admin/settings/admin-api-key'),
+  /**
+   * 读取管理员 API Key 的明文，用于管理台随时复制。
+   * 未生成过 Key 时后端返回 404；每次调用都会写入审计日志（高敏动作）。
+   */
+  revealAdminAPIKey: () => apiFetch<{ key_prefix: string; key: string }>('/api/admin/settings/admin-api-key/secret'),
   rotateAdminAPIKey: () => apiFetch<AdminAPIKey>('/api/admin/settings/admin-api-key', { method: 'POST' }),
   /** 读取「网页抓取」功能配置；后端始终返回带默认值的完整结构 */
   fetchSettings: () => apiFetch<FetchSettings>('/api/admin/fetch/settings'),

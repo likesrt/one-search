@@ -150,9 +150,19 @@
             <code v-if="adminAPIKey?.key_prefix">{{ adminAPIKey.key_prefix }}…</code>
             <el-tag v-else type="info" effect="plain">未生成</el-tag>
           </div>
-          <el-button type="danger" plain @click="generateAdminAPIKey">
-            {{ adminAPIKey?.key_prefix ? '重新随机生成' : '随机生成' }}
-          </el-button>
+          <div class="admin-key-actions">
+            <el-button
+              v-if="adminAPIKey?.key_prefix"
+              :icon="CopyDocument"
+              :loading="revealingAdminKey"
+              @click="copyAdminAPIKey"
+            >
+              复制明文
+            </el-button>
+            <el-button type="danger" plain @click="generateAdminAPIKey">
+              {{ adminAPIKey?.key_prefix ? '重新随机生成' : '随机生成' }}
+            </el-button>
+          </div>
         </div>
         <el-alert
           v-if="rawAdminAPIKey"
@@ -162,12 +172,12 @@
           class="admin-key-alert"
         >
           <template #title>
-            <span>新管理员 API Key 只显示一次：</span>
+            <span>新管理员 API Key：</span>
             <code>{{ rawAdminAPIKey }}</code>
             <el-button link type="primary" @click="copyText(rawAdminAPIKey)">复制</el-button>
           </template>
         </el-alert>
-        <div class="hint-banner">生成后明文只显示一次，请立即保存到密钥管理系统。操作会写入审计日志。</div>
+        <div class="hint-banner">明文加密留存于服务端，可随时点「复制明文」再次获取；每次读取都会写入审计日志。重新生成会使旧 Key 立即失效。</div>
       </section>
 
       <section class="settings-card">
@@ -219,11 +229,13 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { CopyDocument } from '@element-plus/icons-vue'
 import PageSkeleton from '../components/PageSkeleton.vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { api, AdminAPIKey, RuntimeSettings } from '../api/client'
 import { providerOptions } from '../utils/providers'
+import { copyToClipboard } from '../utils/clipboard'
 
 const loading = ref(true)
 const saving = ref(false)
@@ -231,6 +243,8 @@ const settings = ref<RuntimeSettings>()
 const savedSnapshot = ref('')
 const adminAPIKey = ref<AdminAPIKey>()
 const rawAdminAPIKey = ref('')
+/** 「复制明文」按钮的加载态，避免重复点击期间解密请求叠加 */
+const revealingAdminKey = ref(false)
 
 const dirty = computed(() => {
   if (!settings.value || !savedSnapshot.value) return false
@@ -279,10 +293,43 @@ function discard() {
   settings.value = JSON.parse(savedSnapshot.value) as RuntimeSettings
 }
 
+/**
+ * 复制文本到剪贴板并提供成功/失败反馈。
+ *
+ * 走 copyToClipboard 而非直接调用 navigator.clipboard，以兼容通过
+ * http + IP 访问管理台的场景（非安全上下文下 clipboard API 不存在）。
+ *
+ * @param text 待复制文本，为空时直接返回，避免把空串写进剪贴板
+ */
 async function copyText(text: string) {
   if (!text) return
-  await navigator.clipboard.writeText(text)
-  ElMessage.success('已复制')
+  if (await copyToClipboard(text)) {
+    ElMessage.success('已复制')
+  } else {
+    ElMessage.warning('浏览器未授权剪贴板，请手动选择文本复制')
+  }
+}
+
+/**
+ * 读取并复制管理员 API Key 的明文。
+ *
+ * 明文在服务端加密留存、按需解密，因此每次都要请求后端（同时留下高敏审计记录）。
+ * 「未生成」按钮本身不展示，故 404 理论上不会命中，仍按错误提示处理以防并发轮换。
+ */
+async function copyAdminAPIKey() {
+  revealingAdminKey.value = true
+  try {
+    const secret = await api.revealAdminAPIKey()
+    if (!(await copyToClipboard(secret.key))) {
+      ElMessage.warning('浏览器未授权剪贴板，请手动选择文本复制')
+      return
+    }
+    ElMessage.success('管理员 API Key 已复制')
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '复制失败')
+  } finally {
+    revealingAdminKey.value = false
+  }
 }
 
 async function generateAdminAPIKey() {
@@ -425,6 +472,13 @@ onMounted(load)
   gap: 4px;
   min-width: 0;
 }
+/* 两个按钮并排且不换行：窄屏下由 .admin-key-banner 的 flex-wrap 接管换行 */
+.admin-key-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
 .admin-key-info strong { font-size: 14px; }
 .admin-key-info span { color: var(--muted); font-size: 12px; }
 .admin-key-info code,
@@ -510,5 +564,8 @@ onMounted(load)
   }
   .savebar-actions { width: 100%; }
   .savebar-actions :deep(.el-button) { flex: 1; }
+  /* 窄屏下两个按钮等宽铺满，避免「复制明文」在 flex-shrink: 0 下被压得比「重新生成」窄 */
+  .admin-key-actions { width: 100%; }
+  .admin-key-actions :deep(.el-button) { flex: 1; }
 }
 </style>

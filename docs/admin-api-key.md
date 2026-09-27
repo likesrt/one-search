@@ -10,7 +10,7 @@
 - 外部搜索 API Token 前缀：`osr_`
 - 管理员登录 Session Token 前缀：`adm_`
 - 系统同时只保存一个管理员 API Key。每次重新生成都会让旧 Key 立即失效。
-- 管理员 API Key 明文只在生成响应中显示一次，之后只能查看 `key_prefix`、`created_at`、`updated_at`。
+- 管理员 API Key 的明文以密文形式留存在服务端，因此可在管理台随时重新读取（见 2.3）；创建/轮换的响应里也会返回一次明文。
 - 管理员 API Key 拥有完整管理权限，请只保存在可信服务端环境中。
 
 ## 2. 生成和查看管理员 API Key
@@ -64,9 +64,9 @@ curl -X POST http://localhost:5173/api/admin/settings/admin-api-key \
 
 注意：
 
-- `key` 只在这一次响应中出现。
 - 轮换成功后旧的 `oak_` Key 立即不可用。
 - 该操作会写入审计日志，actor 形如 `admin_api_key:<key_prefix>` 或 `admin`。
+- 明文不只在这一次响应中出现：之后可用 2.4 的接口随时重新读取。
 
 ### 2.3 查看当前管理员 API Key 元信息
 
@@ -90,6 +90,30 @@ curl http://localhost:5173/api/admin/settings/admin-api-key \
 ```json
 {}
 ```
+
+该接口不下发明文（SQL 不读取密文列），仅返回前缀与时间。
+
+### 2.4 读取当前管理员 API Key 明文
+
+```bash
+curl http://localhost:5173/api/admin/settings/admin-api-key/secret \
+  -H "Authorization: Bearer adm_xxx"
+```
+
+响应示例：
+
+```json
+{
+  "key_prefix": "oak_abcd",
+  "key": "oak_xxx"
+}
+```
+
+说明：
+
+- 未生成过管理员 API Key 时返回 `404` 与 `admin api key 尚未生成`。
+- 每次调用都会写入审计日志，动作为 `settings.admin_api_key.reveal`（管理台「审计日志」页标记为**高敏**）。
+- 该接口只读取明文，不轮换、不改变任何状态；管理台「系统设置 → 安全」的「复制明文」按钮即调用它。
 
 ## 3. 鉴权调用方式
 
@@ -144,13 +168,15 @@ curl "$BASE_URL/api/admin/dashboard" \
 | `GET` | `/api/admin/providers/health` | 可以 | 获取 Provider 健康状态。 |
 | `PATCH` | `/api/admin/providers/{name}` | 可以 | 更新 Provider 配置。`name` 为内置 Provider 名，例如 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`、`context7`。 |
 | `GET` | `/api/admin/keys` | 可以 | 获取 Provider Key 列表，只返回脱敏信息。 |
+| `GET` | `/api/admin/keys/{id}/secret` | 可以 | 读取指定 Provider Key 的明文（含 Exa 团队密钥）。写 `provider_key.reveal` 审计。 |
 | `POST` | `/api/admin/keys` | 可以 | 创建 Provider Key。 |
 | `PATCH` | `/api/admin/keys/{id}` | 可以 | 更新 Provider Key。 |
 | `POST` | `/api/admin/keys/{id}/test` | 可以 | 使用指定 Provider Key 发起测试搜索。 |
 | `POST` | `/api/admin/keys/{id}/quota` | 可以 | 查询并保存该 Key 的官方额度/账单信息或本地估算额度。 |
 | `DELETE` | `/api/admin/keys/{id}` | 可以 | 删除 Provider Key。 |
 | `GET` | `/api/admin/tokens` | 可以 | 获取外部 API Token 列表，只返回前缀和配置。 |
-| `POST` | `/api/admin/tokens` | 可以 | 创建外部 API Token，响应中的 `raw_token` 只显示一次。 |
+| `POST` | `/api/admin/tokens` | 可以 | 创建外部 API Token，响应中的 `raw_token` 为明文。 |
+| `GET` | `/api/admin/tokens/{id}/secret` | 可以 | 读取指定 Token 的明文。令牌不存在返回 404；明文未留存（老数据）返回 409。写 `api_token.reveal` 审计。 |
 | `PATCH` | `/api/admin/tokens/{id}` | 可以 | 更新 Token 配置或状态。 |
 | `DELETE` | `/api/admin/tokens/{id}` | 可以 | 删除外部 API Token。 |
 | `GET` | `/api/admin/settings` | 可以 | 获取运行时设置。 |
@@ -158,7 +184,8 @@ curl "$BASE_URL/api/admin/dashboard" \
 | `GET` | `/api/admin/fetch/settings` | 可以 | 获取「网页抓取」功能配置（`enabled` / `proxy_url` / `allow_private` / `timeout_ms`）。 |
 | `PUT` | `/api/admin/fetch/settings` | 可以 | 覆盖更新「网页抓取」功能配置；`timeout_ms` 必须在 1–60000，写入后写 `fetch.settings.update` 审计。 |
 | `POST` | `/api/admin/fetch/test` | 可以 | 管理台试抓接口，参数与 `POST /v1/fetch` 一致；成功与失败都写 `fetch.test` 审计。 |
-| `GET` | `/api/admin/settings/admin-api-key` | 可以 | 查看管理员 API Key 元信息。 |
+| `GET` | `/api/admin/settings/admin-api-key` | 可以 | 查看管理员 API Key 元信息（不含明文）。 |
+| `GET` | `/api/admin/settings/admin-api-key/secret` | 可以 | 读取管理员 API Key 明文。未生成时返回 404。写 `settings.admin_api_key.reveal` 审计。 |
 | `POST` | `/api/admin/settings/admin-api-key` | 可以 | 生成/轮换管理员 API Key。 |
 | `GET` | `/api/admin/logs` | 可以 | 获取搜索日志列表。支持 `limit`。 |
 | `GET` | `/api/admin/logs/{id}` | 可以 | 获取单条搜索日志详情和 Provider 调用明细。 |
@@ -565,7 +592,32 @@ curl -X POST "$BASE_URL/api/admin/tokens" \
 }
 ```
 
-`raw_token` 只显示一次。
+`raw_token` 为明文；之后如需再次获取，用下面的接口读取。
+
+### 5.8.1 读取外部 API Token 明文
+
+```bash
+curl "$BASE_URL/api/admin/tokens/1/secret" \
+  -H "Authorization: Bearer $ADMIN_API_KEY"
+```
+
+响应示例：
+
+```json
+{
+  "id": 1,
+  "name": "client-a",
+  "token_prefix": "osr_abcd",
+  "token": "osr_xxx"
+}
+```
+
+说明：
+
+- 令牌不存在时返回 `404` 与 `令牌不存在`。
+- 令牌创建于密文列引入之前（迁移 `0002_api_token_ciphertext.sql` 之前）时，明文未留存，返回 `409` 与 `该令牌的明文未留存，请重建令牌`。
+- 每次调用都会写入审计日志，动作为 `api_token.reveal`（管理台「审计日志」页标记为**高敏**）。
+- 该接口只读取明文，不改变令牌状态；管理台「接口令牌」页列表行操作列的「复制令牌明文」按钮即调用它。
 
 ### 5.9 更新外部 API Token
 
@@ -788,7 +840,8 @@ curl "$BASE_URL/v1/usage/summary" \
 | `400` | JSON 格式错误、路径参数错误、请求体非法。 |
 | `401` | 缺少或使用了无效管理员 Session / 管理员 API Key / API Token。 |
 | `403` | 普通 API Token 请求了未授权 Provider。管理员 API Key 不受此限制。 |
-| `404` | 兼容接口被禁用时返回；或反向代理未命中路径。 |
+| `404` | 兼容接口被禁用时返回；或反向代理未命中路径；或读取明文时目标不存在（管理员 API Key 未生成、Token 不存在）。 |
+| `409` | 读取 Token 明文时该令牌的明文未留存（创建于密文列引入之前），需重建令牌。 |
 | `429` | 管理员登录失败次数过多，或普通 API Token 触发 RPM 限制。 |
 | `502` | Provider Key 测试或官方额度查询时上游失败。 |
 | `500` | 数据库、配置、加解密或内部服务错误。 |
@@ -809,12 +862,15 @@ admin_api_key:oak_abcd
 - `provider_key.test`
 - `provider_key.quota`
 - `provider_key.delete`
+- `provider_key.reveal`
 - `api_token.create`
 - `api_token.update`
 - `api_token.status`
+- `api_token.reveal`
 - `api_token.delete`
 - `settings.update`
 - `settings.admin_api_key.rotate`
+- `settings.admin_api_key.reveal`
 - `admin.logout`
 
 ## 9. 使用建议
@@ -823,4 +879,5 @@ admin_api_key:oak_abcd
 - 不建议把管理员 API Key 放入浏览器前端、移动端或第三方不可控环境。
 - 如只需要搜索能力，应创建 `osr_` 外部 API Token，并用 `allowed_providers`、RPM、日/月额度做限制。
 - 轮换管理员 API Key 前确认所有依赖方都能同步更新；轮换后旧 Key 会立即失效。
+- 凭据明文可从管理台随时读回（见 2.4 与 5.8.1），因此「看不到明文」不再是访问控制的依托：请按密钥本身的价值管控管理台账号与网络入口，并定期检查 `*_reveal` 审计记录。
 - 建议定期查看 `/api/admin/audit-logs`，确认管理操作来源符合预期。

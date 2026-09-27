@@ -386,6 +386,7 @@ import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { ElNotification } from 'element-plus/es/components/notification/index'
 import { Check, CircleCheck, Clock, Close, CopyDocument, Delete, Edit, Plus, Refresh, Remove, WarnTriangleFilled } from '@element-plus/icons-vue'
 import { api, OfficialQuotaResult, ProviderConfig, ProviderKey } from '../api/client'
+import { copyToClipboard } from '../utils/clipboard'
 
 type EditableKey = ProviderKey & { isNew?: boolean }
 type ProviderCard = ProviderConfig & { keyCount: number; enabledKeyCount: number; totalSuccess: number; totalFailure: number; totalCalls: number }
@@ -736,12 +737,29 @@ function formatTime(value: string) {
   return date.toLocaleString()
 }
 
+/**
+ * 复制纯文本（如渠道基础 URL）到剪贴板。
+ * 走 copyToClipboard 而非 navigator.clipboard，以兼容非 HTTPS 访问。
+ * @param text 待复制文本，为空时直接返回
+ */
 async function copyText(text: string) {
   if (!text) return
-  await navigator.clipboard.writeText(text)
-  ElMessage.success('已复制')
+  if (await copyToClipboard(text)) {
+    ElMessage.success('已复制')
+  } else {
+    ElMessage.warning('浏览器未授权剪贴板，请手动选择文本复制')
+  }
 }
 
+/**
+ * 读取渠道密钥明文并复制，对应列表行的「复制密钥」按钮。
+ *
+ * 明文在服务端加密留存、按需解密，每次请求都会写审计（provider_key.reveal）；
+ * 匿名密钥（空 key）没有可复制的明文，单独提示而不当作错误。
+ * 复制失败与取密钥失败共用一条错误分支，错误信息来自后端或剪贴板工具。
+ *
+ * @param row 列表行对应的渠道密钥
+ */
 async function copyKey(row: EditableKey) {
   if (!row.id) return
   copyingKeyId.value = row.id
@@ -751,7 +769,10 @@ async function copyKey(row: EditableKey) {
       ElMessage.warning('未找到可复制的密钥')
       return
     }
-    await navigator.clipboard.writeText(secret.key)
+    if (!(await copyToClipboard(secret.key))) {
+      ElMessage.warning('浏览器未授权剪贴板，请手动选择文本复制')
+      return
+    }
     ElMessage.success('密钥已复制')
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '复制失败')

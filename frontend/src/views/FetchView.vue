@@ -276,6 +276,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import PageSkeleton from '../components/PageSkeleton.vue'
 import { api, FetchResult, FetchSettings } from '../api/client'
+import { copyToClipboard } from '../utils/clipboard'
 
 const loading = ref(true)
 const saving = ref(false)
@@ -513,12 +514,17 @@ function channelLabel(channel: string): string {
 
 /**
  * 复制文本到剪贴板；内容为空时直接返回，避免写入空串。
+ * 走 copyToClipboard 而非 navigator.clipboard，以兼容非 HTTPS 访问；
+ * 失败时提示手动复制，不静默失败。
  * @param text 待复制文本
  */
 async function copyText(text: string) {
   if (!text) return
-  await navigator.clipboard.writeText(text)
-  ElMessage.success('已复制')
+  if (await copyToClipboard(text)) {
+    ElMessage.success('已复制')
+  } else {
+    ElMessage.warning('浏览器未授权剪贴板，请手动选择文本复制')
+  }
 }
 
 /**

@@ -119,6 +119,7 @@ import { ref } from 'vue'
 import { ElMessage } from 'element-plus/es/components/message/index'
 import type { DocBlock } from '../guide/types'
 import { replaceDocOrigin } from '../guide/origin'
+import { copyToClipboard } from '../utils/clipboard'
 
 const props = defineProps<{
   /** 当前小节的内容块，按顺序渲染 */
@@ -187,17 +188,17 @@ function tableCell(row: string[], index: number): string {
 /**
  * 复制代码块内容到剪贴板，并短暂显示「已复制」。
  *
- * 剪贴板在非安全上下文（例如通过 IP 直接访问 http）不可用，此时给出提示
- * 让用户手动选择文本，而不是静默失败。计时器只在自己仍是当前标记时清除，
+ * 剪贴板在非安全上下文（例如通过 IP 直接访问 http）不可用，copyToClipboard 内部
+ * 已降级到 execCommand 兼容路径；连降级也失败时才提示用户手动选择文本，
+ * 而不是静默失败。计时器只在自己仍是当前标记时清除，
  * 连点多个代码块时不会互相覆盖状态。
  *
  * @param content 代码块原始内容（未经地址替换，复制的是可直接使用的原文本）
  * @param index 代码块在 blocks 中的序号，用于标记按钮状态
  */
 async function copyCode(content: string, index: number): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(content)
-  } catch {
+  const ok = await copyToClipboard(content)
+  if (!ok) {
     ElMessage.warning('浏览器未授权剪贴板，请手动选择代码文本')
     return
   }

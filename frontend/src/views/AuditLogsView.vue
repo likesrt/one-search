@@ -150,6 +150,8 @@ const actionChips = [
 
 const HOT_ACTIONS = new Set([
   'provider_key.reveal',
+  'api_token.reveal',
+  'settings.admin_api_key.reveal',
   'settings.admin_api_key.rotate',
 ])
 
@@ -172,6 +174,7 @@ const ACTION_TITLES: Record<string, string> = {
   'admin.logout': '管理员登出',
   'settings.update': '更新运行时设置',
   'settings.admin_api_key.rotate': '轮换管理 API Key',
+  'settings.admin_api_key.reveal': '读取管理 API Key 明文',
   'provider.update': '更新渠道配置',
   'provider_key.create': '创建渠道密钥',
   'provider_key.update': '更新渠道密钥',
@@ -180,6 +183,7 @@ const ACTION_TITLES: Record<string, string> = {
   'provider_key.test': '测试渠道密钥',
   'provider_key.quota': '查询密钥配额',
   'api_token.create': '创建 API 令牌',
+  'api_token.reveal': '读取 API 令牌明文',
   'api_token.update': '更新 API 令牌',
   'api_token.status': '变更令牌状态',
   'api_token.delete': '删除 API 令牌',

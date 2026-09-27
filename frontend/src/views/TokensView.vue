@@ -12,7 +12,7 @@
     <el-alert v-if="rawToken" type="success" show-icon :closable="false" class="token-alert">
       <template #title>
         <div class="raw-token-row">
-          <span>只显示一次</span>
+          <span>新令牌已创建，可随时在列表行点「复制」再次获取</span>
           <code>{{ rawToken }}</code>
           <el-button :icon="CopyDocument" circle size="small" title="复制" @click="copyText(rawToken)" />
         </div>
@@ -52,10 +52,19 @@
           </template>
         </el-table-column>
         <el-table-column prop="usage_count" label="使用" width="90" align="right" />
-        <el-table-column label="" width="132" align="right">
+        <el-table-column label="" width="164" align="right">
           <template #default="scope">
             <div class="row-actions">
               <el-button link :icon="Edit" title="编辑" @click="openEdit(scope.row)" />
+              <el-tooltip content="复制令牌明文" placement="top">
+                <el-button
+                  link
+                  :icon="CopyDocument"
+                  :loading="copyingTokenId === scope.row.id"
+                  aria-label="复制令牌明文"
+                  @click="copyToken(scope.row)"
+                />
+              </el-tooltip>
               <el-button
                 link
                 :icon="scope.row.status === 'enabled' ? Remove : CircleCheck"
@@ -98,12 +107,14 @@ import { CircleCheck, CopyDocument, Delete, Edit, Plus, Remove } from '@element-
 import PageSkeleton from '../components/PageSkeleton.vue'
 import { api, ApiToken } from '../api/client'
 import { providerLabel, providerOptions } from '../utils/providers'
+import { copyToClipboard } from '../utils/clipboard'
 
 const loading = ref(true)
 const loaded = ref(false)
 const tokens = ref<ApiToken[]>([])
 const dialog = ref(false)
 const rawToken = ref('')
+const copyingTokenId = ref<number | null>(null)
 const editingToken = ref<ApiToken | null>(null)
 const form = reactive({
   name: '默认客户端',
@@ -163,10 +174,47 @@ function openEdit(token: ApiToken) {
   dialog.value = true
 }
 
+/**
+ * 复制文本到剪贴板并提供成功/失败反馈。
+ *
+ * 走 copyToClipboard 而非直接调用 navigator.clipboard，以兼容通过
+ * http + IP 访问管理台的场景（非安全上下文下 clipboard API 不存在）。
+ *
+ * @param text 待复制文本，为空时直接返回，避免把空串写进剪贴板
+ */
 async function copyText(text: string) {
   if (!text) return
-  await navigator.clipboard.writeText(text)
-  ElMessage.success('已复制')
+  if (await copyToClipboard(text)) {
+    ElMessage.success('已复制')
+  } else {
+    ElMessage.warning('浏览器未授权剪贴板，请手动选择文本复制')
+  }
+}
+
+/**
+ * 读取指定令牌的明文并复制，对应管理台列表行的「复制」按钮。
+ *
+ * 明文在服务端加密留存、按需解密，因此每次都要请求后端（同时留下审计记录），
+ * 而不是从列表数据里取——列表接口刻意不下发明文。
+ * 老令牌（迁移 0002 之前创建）没有留存密文，后端返回 409 并附带可读原因，
+ * 这里直接把它透出给用户，而不是统一提示「复制失败」。
+ *
+ * @param token 列表行对应的令牌
+ */
+async function copyToken(token: ApiToken) {
+  copyingTokenId.value = token.id
+  try {
+    const secret = await api.revealToken(token.id)
+    if (!(await copyToClipboard(secret.token))) {
+      ElMessage.warning('浏览器未授权剪贴板，请手动选择文本复制')
+      return
+    }
+    ElMessage.success('令牌已复制')
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '复制失败')
+  } finally {
+    copyingTokenId.value = null
+  }
 }
 
 async function saveToken() {
