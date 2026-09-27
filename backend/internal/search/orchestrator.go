@@ -36,6 +36,16 @@ type Store interface {
 	SetCache(ctx context.Context, cacheKey string, payload []byte, ttlSeconds int) error
 }
 
+// urlExtractor 是「能按 URL 取回整页正文」的适配器所实现的**可选**接口。
+//
+// 刻意不把它并进 provider.Provider：那会逼着九个适配器全部实现 Extract，
+// 而其中只有 tavily 有对应的上游能力。用类型断言探测能力，不满足时返回明确错误，
+// 新增渠道也不必为了满足接口而写一个总是报错的空实现。
+type urlExtractor interface {
+	// Extract 返回整页正文与本次消耗的 credits
+	Extract(ctx context.Context, targetURL string, key model.APIKey) (string, float64, error)
+}
+
 type Orchestrator struct {
 	registry       *provider.Registry
 	keyPool        KeyPool
@@ -1282,4 +1292,110 @@ func (o *Orchestrator) TestProviderKey(ctx context.Context, keyID int64, query s
 	summary.Status = "success"
 	_ = o.store.RecordKeyResult(context.Background(), key, true, "")
 	return summary, providerResponse.Results, nil
+}
+
+// TavilyExtract 用 key 池里的 tavily key 调 POST /extract 取回整页正文。
+//
+// 这是抓取功能回退通道的落点：本方法刻意留在 search 包而不是搬到 api 层，因为
+// keyPool / registry / store 都由 Orchestrator 持有，adapterForProvider 也未导出，
+// 搬到 api 层会让 api 包反向依赖渠道构建细节。
+//
+// 走 keyPool.Acquire 而不是直接用某个 key：这样自动继承 key 轮换、失败冷却、
+// 日/月额度与渠道级 max_concurrency 的全部既有语义，与搜索链路保持一致
+// （同一个 key = 同一个账户、同一出口）。
+//
+// 参数 targetURL 必须是完整的 http/https 地址（抓取侧已校验）。
+//
+// 返回值：整页正文（未截断）、本次消耗的 credits、错误。以下情况返回错误且不发起请求：
+// 渠道未注册、取不到可用 key（无 key / 全部冷却 / 渠道并发已满）。
+//
+// 副作用：取出并释放一次 key（回写健康度与用量）；发起真实网络请求并消耗第三方额度；
+// 成功后异步刷新该 key 的官方额度（与搜索路径同源，key.ID 为 0 时跳过）。
+func (o *Orchestrator) TavilyExtract(ctx context.Context, targetURL string) (string, float64, error) {
+	if !o.providerRegistered(model.ProviderTavily) {
+		return "", 0, &provider.Error{Type: provider.ErrorTypeUpstream, Message: "provider is not registered"}
+	}
+	key, release, err := o.keyPool.Acquire(ctx, model.ProviderTavily)
+	if err != nil {
+		return "", 0, err
+	}
+	// release 必须调用：它负责把 key 的活跃计数减一（渠道级 max_concurrency 的依据）
+	// 并把成功/失败写回 key 健康度。用命名变量在 defer 里回写，避免每条分支各写一次。
+	extractErr := error(nil)
+	defer func() { release(extractErr == nil, extractErr) }()
+
+	plan, err := o.tavilyExtractPlanFor(ctx, key)
+	if err != nil {
+		extractErr = err
+		return "", 0, err
+	}
+	extractor, ok := plan.adapter.(urlExtractor)
+	if !ok {
+		// 渠道注册了但适配器不支持 extract（例如测试里注册的替身）：
+		// 这不是故障而是能力缺失，错误文案要让调用方能据此区分「该渠道不支持」
+		extractErr = &provider.Error{Type: provider.ErrorTypeUpstream, Message: "provider does not support extract"}
+		return "", 0, extractErr
+	}
+	callCtx, cancel := tavilyCallContext(ctx, plan.timeoutMS)
+	defer cancel()
+
+	content, credits, err := extractor.Extract(callCtx, targetURL, key)
+	extractErr = err
+	if err != nil {
+		return "", 0, err
+	}
+	o.refreshOfficialQuota(key, plan.proxyURL)
+	return content, credits, nil
+}
+
+// tavilyExtractPlan 汇总一次 extract 调用所需的渠道侧配置。
+type tavilyExtractPlan struct {
+	// proxyURL 是解析后的代理地址，同时交给额度自动刷新复用，避免额度查询与提取走不同出口
+	proxyURL string
+	// adapter 是按 key 级 base_url 与代理构建好的适配器
+	adapter provider.Provider
+	// timeoutMS 是渠道级超时（毫秒），<=0 表示沿用上游 ctx 的 deadline
+	timeoutMS int
+}
+
+// tavilyExtractPlanFor 读取渠道配置并组装一次 extract 调用所需的适配器与超时。
+//
+// 之所以把「渠道配置 → 代理 → 超时 → 适配器」这一段单独拆出：TavilyExtract 已经承担了
+// key 获取、类型断言、调用与释放，再把配置解析塞进去会超出函数长度上限。
+// 代理与 base_url 都按 key 级三态解析，与 callProvider 的既有模型完全一致 ——
+// key 可覆盖 base_url，同一渠道的不同 key 可能指向不同中转站或不同出口，
+// 因此适配器必须按每次取出的 key 重新构建，不能跨 key 复用。
+//
+// 只查一次 ListProviders 并派生超时与代理两张表，避免为同一份配置重复读库。
+//
+// 参数 ctx 用于读取渠道配置，key 为本次取出的密钥。
+// 返回值：组装好的 plan；读库失败或渠道未注册时返回错误。
+func (o *Orchestrator) tavilyExtractPlanFor(ctx context.Context, key model.APIKey) (tavilyExtractPlan, error) {
+	providerConfigs, err := o.store.ListProviders(ctx)
+	if err != nil {
+		return tavilyExtractPlan{}, err
+	}
+	providerSettings := providerSettingsFromProviders(providerConfigs)
+	providerConfigByName := providerConfigMap(providerConfigs)
+	proxyURL := ResolveProxyURL(key.ProxyMode, key.ProxyURL, providerProxies(providerSettings)[model.ProviderTavily])
+	timeoutMS := providerTimeouts(providerSettings)[model.ProviderTavily]
+	adapter, ok := o.adapterForProvider(model.ProviderTavily,
+		providerConfigByName[model.ProviderTavily], key.BaseURL, timeoutMS, proxyURL)
+	if !ok {
+		return tavilyExtractPlan{}, &provider.Error{Type: provider.ErrorTypeUpstream, Message: "provider is not registered"}
+	}
+	return tavilyExtractPlan{proxyURL: proxyURL, adapter: adapter, timeoutMS: timeoutMS}, nil
+}
+
+// tavilyCallContext 为一次 extract 调用派生带渠道超时的 context。
+//
+// 超时复用 Tavily 渠道的 timeout_ms（与搜索同源），因此抓取侧不需要单独的「回退超时」配置。
+// timeoutMS <= 0 时沿用上游 ctx 的 deadline。
+//
+// 返回值：新的 context 与 cancel 函数，调用方必须调用 cancel 以免泄漏定时器。
+func tavilyCallContext(ctx context.Context, timeoutMS int) (context.Context, context.CancelFunc) {
+	if timeoutMS > 0 {
+		return context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
+	}
+	return context.WithCancel(ctx)
 }
