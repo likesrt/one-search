@@ -87,6 +87,35 @@ func (s *Store) GetAdminAPIKey(ctx context.Context) (model.AdminAPIKey, error) {
 	return item, nil
 }
 
+// RevealAdminAPIKey 解密并返回管理员 API Key 的明文，供管理台「复制」使用。
+//
+// 与 GetAdminAPIKey 保持一致：尚未生成过 Key（无行）时返回零值结构体而不报错，
+// 由调用方以 KeyPrefix 是否为空来判断「未生成」。
+// 与 GetAdminAPIKey 分开实现而非合并，是为了让元信息接口（GET /settings/admin-api-key）
+// 的 SQL 里根本不出现密文列，避免明文随元信息接口外泄。
+// key_ciphertext 列为 NOT NULL，故不存在「历史数据无明文」的情况。
+// 解密失败返回带上下文的错误（不含密文内容），不吞异常。
+func (s *Store) RevealAdminAPIKey(ctx context.Context) (model.AdminAPIKey, error) {
+	row := s.pool.QueryRow(ctx, `SELECT key_prefix, key_ciphertext, created_at, updated_at FROM admin_api_keys WHERE id=TRUE`)
+	var item model.AdminAPIKey
+	var ciphertext string
+	var createdAt, updatedAt time.Time
+	if err := row.Scan(&item.KeyPrefix, &ciphertext, &createdAt, &updatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.AdminAPIKey{}, nil
+		}
+		return model.AdminAPIKey{}, err
+	}
+	plain, err := s.crypto.Decrypt(ciphertext)
+	if err != nil {
+		return model.AdminAPIKey{}, fmt.Errorf("decrypt admin api key %s: %w", item.KeyPrefix, err)
+	}
+	item.Key = plain
+	item.CreatedAt = &createdAt
+	item.UpdatedAt = &updatedAt
+	return item, nil
+}
+
 func (s *Store) RotateAdminAPIKey(ctx context.Context) (model.AdminAPIKey, string, error) {
 	rawToken, err := security.RandomToken("oak_")
 	if err != nil {
@@ -831,6 +860,40 @@ func (s *Store) ListAPITokens(ctx context.Context) ([]model.APIToken, error) {
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// RevealAPIToken 读取并解密指定令牌的明文，供管理台「复制」使用。
+//
+// 与 ListAPITokens 刻意不返回明文不同，此方法专用于单条令牌的明文读取，
+// 调用方（handler）负责写审计日志。
+// 「令牌不存在」沿用 GetAdminAPIKey 的既有约定：吞掉 pgx.ErrNoRows 并返回零值结构体
+// （ID 为 0）而不报错，让 api 层无需为此依赖 pgx 驱动。
+// 密文列由迁移 0002 引入且可空，故用 COALESCE 兜底：迁移前创建的老行读出空串，
+// 此时返回的 Token 为空且不报错，由调用方区分并提示「明文未留存，请重建」。
+// osr_ 明文恒非空（RandomToken 生成），因此 Token 为空只可能意味着密文缺失。
+// 解密失败返回带上下文的错误（不含密文内容），不吞异常。
+func (s *Store) RevealAPIToken(ctx context.Context, id int64) (model.APIToken, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, name, token_prefix, COALESCE(token_ciphertext, ''), status
+		FROM api_tokens WHERE id=$1
+	`, id)
+	var item model.APIToken
+	var ciphertext string
+	if err := row.Scan(&item.ID, &item.Name, &item.TokenPrefix, &ciphertext, &item.Status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.APIToken{}, nil
+		}
+		return model.APIToken{}, err
+	}
+	if ciphertext == "" {
+		return item, nil
+	}
+	plain, err := s.crypto.Decrypt(ciphertext)
+	if err != nil {
+		return model.APIToken{}, fmt.Errorf("decrypt api token %s: %w", item.TokenPrefix, err)
+	}
+	item.Token = plain
+	return item, nil
 }
 
 // CreateAPIToken 创建外部 API 令牌并返回明文（明文只在此处产生一次）。

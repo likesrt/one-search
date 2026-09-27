@@ -34,11 +34,15 @@ type AppStore interface {
 	UpdateProviderKey(ctx context.Context, id int64, patch model.ProviderKeyUpdate) (model.ProviderKeyView, error)
 	DeleteProviderKey(ctx context.Context, id int64) error
 	ListAPITokens(ctx context.Context) ([]model.APIToken, error)
+	// RevealAPIToken 读取单条令牌的明文（密文缺失时 Token 为空）；不存在时返回 pgx.ErrNoRows。
+	RevealAPIToken(ctx context.Context, id int64) (model.APIToken, error)
 	CreateAPIToken(ctx context.Context, name string, scopes []string, allowedProviders []string, rateLimit, dailyQuota, monthlyQuota int) (model.APIToken, string, error)
 	UpdateAPITokenStatus(ctx context.Context, id int64, status string) error
 	UpdateAPIToken(ctx context.Context, id int64, name string, allowedProviders []string, rateLimit, dailyQuota, monthlyQuota int) error
 	DeleteAPIToken(ctx context.Context, id int64) error
 	GetAdminAPIKey(ctx context.Context) (model.AdminAPIKey, error)
+	// RevealAdminAPIKey 读取管理员 API Key 的明文；未生成时返回零值结构体而不报错。
+	RevealAdminAPIKey(ctx context.Context) (model.AdminAPIKey, error)
 	RotateAdminAPIKey(ctx context.Context) (model.AdminAPIKey, string, error)
 	UpdateRuntimeSettings(ctx context.Context, settings model.RuntimeSettings) error
 	FetchSettings(ctx context.Context) (model.FetchSettings, error)
@@ -215,6 +219,7 @@ func (h *Handler) mountAdminRoutes(r chi.Router) {
 			r.Delete("/keys/{id}", h.deleteKey)
 			r.Get("/tokens", h.listTokens)
 			r.Post("/tokens", h.createToken)
+			r.Get("/tokens/{id}/secret", h.revealToken)
 			r.Patch("/tokens/{id}", h.updateToken)
 			r.Delete("/tokens/{id}", h.deleteToken)
 			r.Get("/settings", h.getSettings)
@@ -223,6 +228,7 @@ func (h *Handler) mountAdminRoutes(r chi.Router) {
 			r.Put("/fetch/settings", h.updateFetchSettings)
 			r.Post("/fetch/test", h.testFetch)
 			r.Get("/settings/admin-api-key", h.getAdminAPIKey)
+			r.Get("/settings/admin-api-key/secret", h.revealAdminAPIKey)
 			r.Post("/settings/admin-api-key", h.rotateAdminAPIKey)
 			r.Get("/logs", h.logs)
 			r.Get("/logs/{id}", h.logDetail)
@@ -813,6 +819,42 @@ func (h *Handler) listTokens(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"tokens": tokens})
 }
 
+// revealToken 读取外部 API 令牌明文。GET /api/admin/tokens/{id}/secret
+//
+// 与 listTokens 刻意不返回明文相对：列表接口的 SQL 不取密文列，明文只在本接口按需解密。
+// 三种失败语义分开返回，便于前端给出可操作的提示，而不是笼统报「复制失败」：
+// id 非法 → 400；令牌不存在（store 返回零值结构体，ID 为 0）→ 404；
+// 迁移 0002 之前创建的老行密文为 NULL → 409（明文未留存，需重建）。
+// 明文非空即先写审计再返回；响应用 map 手工拼装，避免 model 的 json tag 变动影响明文的暴露面。
+func (h *Handler) revealToken(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	token, err := h.store.RevealAPIToken(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// store 对不存在的行返回零值结构体（ID 为 0），据此与「密文缺失」区分开
+	if token.ID == 0 {
+		writeError(w, http.StatusNotFound, "令牌不存在")
+		return
+	}
+	if token.Token == "" {
+		writeError(w, http.StatusConflict, "该令牌的明文未留存，请重建令牌")
+		return
+	}
+	h.audit(r, "admin", "api_token.reveal", "api_token", strconv.FormatInt(id, 10), map[string]interface{}{"name": token.Name, "token_prefix": token.TokenPrefix})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"id":           token.ID,
+		"name":         token.Name,
+		"token_prefix": token.TokenPrefix,
+		"token":        token.Token,
+	})
+}
+
 func (h *Handler) createToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name             string   `json:"name"`
@@ -899,6 +941,30 @@ func (h *Handler) getAdminAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, key)
+}
+
+// revealAdminAPIKey 读取管理员 API Key 明文。GET /api/admin/settings/admin-api-key/secret
+//
+// 与元信息接口（getAdminAPIKey）分开：元信息接口的 SQL 里根本不出现密文列，
+// 明文只在需要时由本接口按需解密，避免「查看前缀」这种高频调用也触碰明文。
+// 未生成过 Key 时 store 返回零值结构体，这里回 404 让调用方明确区分「不存在」。
+// 解密成功先写审计再返回；响应手工拼 map，避免 model 上的 json tag 变化意外放大明文的暴露面。
+// 无论是否已有 Key，本接口都不轮换、不改变任何状态。
+func (h *Handler) revealAdminAPIKey(w http.ResponseWriter, r *http.Request) {
+	key, err := h.store.RevealAdminAPIKey(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if key.KeyPrefix == "" {
+		writeError(w, http.StatusNotFound, "admin api key 尚未生成")
+		return
+	}
+	h.audit(r, "admin", "settings.admin_api_key.reveal", "settings", "admin_api_key", map[string]interface{}{"key_prefix": key.KeyPrefix})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"key_prefix": key.KeyPrefix,
+		"key":        key.Key,
+	})
 }
 
 func (h *Handler) rotateAdminAPIKey(w http.ResponseWriter, r *http.Request) {
