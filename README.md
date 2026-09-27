@@ -26,7 +26,7 @@ cd one-search
 cp .env.example .env
 ```
 
-编辑 `.env`，至少填写：
+编辑 `.env`，填写标「必填」的三项（其余项都有出厂默认值，可按注释调整）：
 
 ```dotenv
 POSTGRES_PASSWORD=强密码
@@ -39,7 +39,8 @@ docker compose up --build -d
 curl http://localhost:5173/healthz
 ```
 
-打开 <http://localhost:5173>，用管理员账号登录。
+打开 <http://localhost:5173>，用管理员账号登录。端口由 `.env` 的 `HOST_PORT` 决定
+（容器内固定 80）。
 
 ## 首次配置
 
@@ -129,35 +130,35 @@ enabled_tools = ["search", "fetch"]
 
 ## 配置说明
 
-### 常用（`.env.example` 已列出）
+所有环境变量都在 `.env` 里，每一项的默认值与含义直接写在
+[`.env.example`](.env.example) 的注释中（compose 只是把这个文件整体读进容器，
+不再持有第二份默认值）。
+
+部署时至少要改的是这三项：
+
+| 变量 | 说明 |
+| --- | --- |
+| `POSTGRES_PASSWORD` | **必填**，数据库密码 |
+| `ADMIN_PASSWORD` | **必填**，首次启动创建的管理员密码 |
+| `ENCRYPTION_KEY` | **必填**，≥32 字符，加解密上游 Key 与凭据明文 |
+
+最常改的还有：
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `HOST_PORT` | `5173` | 宿主机端口 |
-| `POSTGRES_PASSWORD` | — | **必填** |
+| `HOST_PORT` | `5173` | 宿主机端口，容器内固定 80 |
 | `ADMIN_USERNAME` | `admin` | 首次管理员用户名 |
-| `ADMIN_PASSWORD` | — | 生产**必填** |
-| `ENCRYPTION_KEY` | — | **必填**，≥32 字符，加密敏感 Key |
 | `API_AUTH_REQUIRED` | `true` | `/v1/*`、MCP 是否强制 Token |
 | `MCP_ENABLED` | `true` | 是否开启 MCP |
-
-### 可选（一般不用改，需要时加到 `.env`）
-
-| 变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `APP_ENV` | Compose 下 `production` | 生产请保持 `production` |
-| `POSTGRES_DB` / `POSTGRES_USER` | `one_search` | 库名 / 用户 |
-| `HTTP_ADDR` | `:8080` | 容器内后端监听地址 |
 | `MCP_PATH` | `/mcp` | MCP 路径 |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:8080` | CORS 白名单 |
-| `DATABASE_URL` | 本地开发用 | all-in-one 会自动生成，无需手写 |
-| `RUN_MIGRATIONS` | `true` | 启动时自动迁移 |
-| `REQUEST_TIMEOUT_MS` | `20000` | 上游请求超时 |
-| `REQUEST_BODY_LIMIT_BYTES` | `1048576` | 请求体上限 |
-| `SERVER_*_TIMEOUT_MS` | 见代码默认 | HTTP 服务器超时 |
-| `ADMIN_SESSION_TTL_HOURS` | `24` | 管理 Session 时长 |
-| `ADMIN_LOGIN_MAX_ATTEMPTS` 等 | 5 / 5min / 15min | 登录限速与锁定 |
-| `VITE_API_BASE` | 空 | 前后端分离开发时指向后端 |
+
+其余运行参数（`APP_ENV`、`RUN_MIGRATIONS`、`REQUEST_TIMEOUT_MS`、
+`SERVER_*_TIMEOUT_MS`、`ADMIN_SESSION_TTL_HOURS`、`ADMIN_LOGIN_*`、
+`FETCH_CACHE_DIR` 等）同样列在 `.env.example` 里，一般不用改。
+
+注意：`HTTP_ADDR` 与 `DATABASE_URL` 由容器入口脚本自行设置（后端监听 `:8080`、
+连接容器内的 PostgreSQL），不需要也不应该写在 `.env` 里。
 
 公网请在前面加 HTTPS 反代，转发 `/`、`/api/`、`/v1/`、`/healthz`（以及 `/mcp`）。
 
