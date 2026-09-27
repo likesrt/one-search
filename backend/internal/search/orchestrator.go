@@ -815,6 +815,34 @@ func (o *Orchestrator) providerRegistered(name string) bool {
 	return false
 }
 
+// SupportsAnonymousKey 报告指定渠道无密钥时能否正常调用，供管理台提示使用。
+//
+// 查询口径与 adapterForProvider 一致：优先用工厂按默认配置构造一个适配器，工厂不存在时
+// 回退到已注册的实例（生产环境只注册工厂，测试里则可能直接注册实例）。
+// 这里刻意不传 key 级的 base_url / 代理：该能力是渠道级常量，与每次请求变化的配置无关。
+// 构造适配器只为读一个 bool，代价是新建一个 http.Client —— 调用点是管理台的渠道列表接口，
+// 频率极低，不值得为此在 Registry 上再引入一层缓存或不依赖实例的旁路接口。
+//
+// 之所以由 Orchestrator 转发而不是让 api 包直接持有 Registry：Registry 由编排层持有，
+// 从 api 包直连会让渠道能力出现第二个查询入口；api 包本来就依赖 search 包，方向不成环。
+//
+// 返回值的语义与 provider.Provider.SupportsAnonymousKey 一致 —— 仅用于提示：
+// 渠道不存在或走 HTTPProvider 默认实现时返回 false，不返回错误。
+// 边界条件：registry 为 nil（部分测试用零值构造 Orchestrator）时直接返回 false，不 panic。
+func (o *Orchestrator) SupportsAnonymousKey(name string) bool {
+	if o.registry == nil {
+		return false
+	}
+	if adapter, ok := o.registry.Build(name, provider.Config{}); ok && adapter != nil {
+		return adapter.SupportsAnonymousKey()
+	}
+	adapter, ok := o.registry.Get(name)
+	if !ok || adapter == nil {
+		return false
+	}
+	return adapter.SupportsAnonymousKey()
+}
+
 func providerSettingsFromProviders(providers []model.ProviderConfig) map[string]map[string]interface{} {
 	settings := map[string]map[string]interface{}{}
 	for _, item := range providers {

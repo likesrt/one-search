@@ -122,6 +122,10 @@ type ProviderConfig struct {
 	TimeoutMS     int                    `json:"timeout_ms"`
 	Settings      map[string]interface{} `json:"settings,omitempty"`
 	AvailableKeys int                    `json:"available_keys,omitempty"`
+	// SupportsAnonymousKey 表示该渠道无密钥时能否正常调用。它**不是**数据库字段，
+	// 因此在 ListProviders 之后由 Handler 依据 provider.Registry 现场填充，仅用于管理台提示，
+	// 不参与任何放行判断（中转站场景下报告 false 的渠道也可能因自定义 base_url 而可用）。
+	SupportsAnonymousKey bool `json:"supports_anonymous_key"`
 }
 
 // APIKey 是从密钥池取出、供适配器直接使用的一条渠道密钥。

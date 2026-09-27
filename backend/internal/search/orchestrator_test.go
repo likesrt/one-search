@@ -168,6 +168,9 @@ func (p orchestratorTestProvider) HealthCheck(ctx context.Context, key model.API
 	return nil
 }
 
+// SupportsAnonymousKey 让测试替身满足 Provider 接口；测试渠道一律不具备匿名能力。
+func (p orchestratorTestProvider) SupportsAnonymousKey() bool { return false }
+
 func TestSearchSkipsDisabledDefaultProviders(t *testing.T) {
 	keyPool := &orchestratorTestKeyPool{}
 	orchestrator := newDisabledProviderTestOrchestrator(keyPool)
@@ -538,6 +541,9 @@ func (p *flakyTestProvider) Search(ctx context.Context, req model.SearchRequest,
 }
 
 func (p *flakyTestProvider) HealthCheck(ctx context.Context, key model.APIKey) error { return nil }
+
+// SupportsAnonymousKey 让测试替身满足 Provider 接口；该替身用于换 key 重试场景，与匿名能力无关。
+func (p *flakyTestProvider) SupportsAnonymousKey() bool { return false }
 
 func TestSearchRetryPassesTriedKeyIDsToKeyPool(t *testing.T) {
 	// 这里需要正数 key ID：triedIDs 只在 key.ID>0 时记录，才能断言第二次取 key 时被排除。

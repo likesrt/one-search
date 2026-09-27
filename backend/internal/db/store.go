@@ -625,25 +625,22 @@ func officialQuotaCanExhaustKey(providerName string) bool {
 	}
 }
 
+// RecordKeyResult 记录一次 key 调用的成败，并据此维护 key 的可用状态与计数。
+//
+// 成功时置 enabled 并清零连续失败；失败时按 errorType 自动流转：auth → disabled、
+// quota_exhausted → exhausted、rate_limited → cooling（冷却 15 分钟），其余错误保持 enabled。
+//
+// 边界条件：**匿名 key（密钥内容去空白后为空）跳过全部自动状态变更**，但仍照常累加
+// total_successes / total_failures 并刷新 last_used_at，管理台因此能看到它的失败统计。
+// 之所以对匿名 key 特判：本网关允许「空密钥条目」表达无密钥调用，对不支持匿名的渠道而言
+// 空 key 必然拿到 auth 错误，若照常流转就会被自动停用，用户既没配错也没手动停用，
+// 却只看到一条 disabled 记录、看不出原因；保留 enabled 可让它继续参与路由、由管理台提示与文档说明风险。
+// 非空 key 的全部行为与改动前完全一致。状态决策本身在 nextKeyStatus 里，便于脱离数据库单测。
+//
+// 副作用：写库更新 provider_keys 行（status / 计数 / cooldown_until / last_used_at）。
+// 参数 errorType 取 provider.ErrorType 的口径，仅在 success 为 false 时有意义。
 func (s *Store) RecordKeyResult(ctx context.Context, key model.APIKey, success bool, errorType string) error {
-	status := key.Status
-	var cooldown *time.Time
-	if success {
-		status = "enabled"
-	} else {
-		switch errorType {
-		case "auth":
-			status = "disabled"
-		case "quota_exhausted":
-			status = "exhausted"
-		case "rate_limited":
-			status = "cooling"
-			until := time.Now().Add(15 * time.Minute)
-			cooldown = &until
-		default:
-			status = "enabled"
-		}
-	}
+	status, cooldown := nextKeyStatus(key, success, errorType, time.Now())
 	_, err := s.pool.Exec(ctx, `
 		UPDATE provider_keys
 		SET status=$2,
@@ -656,6 +653,46 @@ func (s *Store) RecordKeyResult(ctx context.Context, key model.APIKey, success b
 		WHERE id=$1 AND status <> 'deleted'
 	`, key.ID, status, success, cooldown)
 	return err
+}
+
+// nextKeyStatus 计算一次调用结束后 key 应有的状态与冷却截止时间，是 RecordKeyResult 的纯决策部分。
+//
+// 参数：key 为被调用的密钥（只读 key.Value / key.Status）；success 表示本次调用是否成功；
+// errorType 取 provider.ErrorType 的口径，仅在 success 为 false 时有意义；now 为当前时间，
+// 由调用方注入以便测试断言冷却时刻而无需伪造时钟。
+//
+// 返回值：status 为应写入的新状态；cooldown 为冷却截止时间，nil 表示不设冷却
+// （SQL 侧以 NULL 覆盖，等价于清除既有冷却期）。
+//
+// 边界条件 —— 匿名 key（密钥内容去空白后为空）：**不做任何状态流转**，status 原样返回库里已有的值、
+// cooldown 恒为 nil。原因见 RecordKeyResult 的注释：空 key 对不支持匿名的渠道必然失败，
+// 若照常流转就会被自动停用且用户看不出原因。
+//
+// 判据用 strings.TrimSpace(key.Value) == "" 而不是 key.Value == ""，是为了与 security.MaskSecret
+// 的空值口径同源（掩码为空 ≡ 条目在管理台显示为「匿名」）：若这里只认严格空串，
+// 一条纯空白的密钥会显示成「匿名」却被 auth 失败自动停用，正是本规则要避免的那种「看不出原因」。
+// 对任何真实密钥（首尾无空白、也不可能只有空白）行为完全一致。
+// 之所以用 key.Value 而不是 key.KeyHint：后者是展示字段，可能不随调用路径填充。
+func nextKeyStatus(key model.APIKey, success bool, errorType string, now time.Time) (string, *time.Time) {
+	status := key.Status
+	if success {
+		// 成功一律回到 enabled：这是既有的「自愈」语义，匿名 key 同样适用。
+		return "enabled", nil
+	}
+	if strings.TrimSpace(key.Value) == "" {
+		return status, nil
+	}
+	switch errorType {
+	case "auth":
+		return "disabled", nil
+	case "quota_exhausted":
+		return "exhausted", nil
+	case "rate_limited":
+		until := now.Add(15 * time.Minute)
+		return "cooling", &until
+	default:
+		return "enabled", nil
+	}
 }
 
 func (s *Store) FindAPIToken(ctx context.Context, token string) (model.APIToken, error) {

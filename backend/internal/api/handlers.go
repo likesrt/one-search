@@ -395,13 +395,34 @@ func (h *Handler) runSearch(w http.ResponseWriter, r *http.Request, req model.Se
 	writeJSON(w, http.StatusOK, response)
 }
 
+// providers 返回渠道列表（GET /api/admin/providers 与 GET /v1/providers 共用）。
+// 渠道配置本身来自数据库，supports_anonymous_key 不是数据库字段，
+// 因此在 ListProviders 之后按渠道名向编排层补充，供管理台做「是否支持无密钥调用」的提示。
+// 边界条件：orchestrator 为 nil 时（部分测试用零值 Handler 构造）跳过补充，
+// 字段保持 false，语义退化为「未声明支持匿名」，不会 panic。
 func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
 	providers, err := h.store.ListProviders(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	h.fillAnonymousKeySupport(providers)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"providers": providers})
+}
+
+// fillAnonymousKeySupport 就地补全每个渠道的 SupportsAnonymousKey 标记。
+//
+// 之所以单独抽成函数而不是内联：该字段不是数据库列，凡是把 ListProviders 结果直接下发给管理台的
+// 出口都必须补全，否则前端在不同页面会看到不一致的能力提示；抽出来便于后续出口复用同一份口径。
+// 参数 providers 为待补全的切片（原地修改，调用方传入的切片元素会被改写）；
+// 切片为 nil/空或 orchestrator 为 nil 时直接返回，不产生副作用。
+func (h *Handler) fillAnonymousKeySupport(providers []model.ProviderConfig) {
+	if h.orchestrator == nil {
+		return
+	}
+	for index := range providers {
+		providers[index].SupportsAnonymousKey = h.orchestrator.SupportsAnonymousKey(providers[index].Name)
+	}
 }
 
 func (h *Handler) usageSummary(w http.ResponseWriter, r *http.Request) {
@@ -669,7 +690,9 @@ func validateProviderKeyBaseURL(raw string, providerName string) error {
 }
 
 // createKey 新建渠道密钥。/api/admin/keys
-// 必填 provider_name、key；base_url 选填，留空表示沿用渠道默认地址；
+// 必填 provider_name；key 允许留空（或纯空白）—— 表示一条**匿名密钥**，即该渠道的无密钥调用，
+// 故这里刻意不做非空校验（空密钥对不支持匿名的渠道会失败，但是否值得配由用户决定，服务端不放行判断）；
+// base_url 选填，留空表示沿用渠道默认地址；
 // proxy_mode 取 inherit/direct/custom（缺省或非法值由 store 收敛为 inherit），proxy_url 仅 custom 有意义。
 // 参数校验不通过返回 400，底层写入失败返回 500，成功返回 201 与完整密钥视图。
 func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
