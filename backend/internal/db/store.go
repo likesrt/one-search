@@ -232,8 +232,9 @@ func (s *Store) UpdateRuntimeSettings(ctx context.Context, settings model.Runtim
 // 阈值 80、缓存 120s/3MB/256MB、并发 32），因此新库无需迁移文件即可用。
 // 数值越界在此收敛，与 api 层的展示约束一致，避免历史脏数据让前端显示一个不可保存的值。
 //
-// 注意 enabled 与 timeout_ms 的既有行为逐字未变：前者按零值 false 处理（历史数据里
-// 该字段缺失时表现为关闭，与旧版一致），后者 <=0 取 30000、>60000 收敛到 60000。
+// 注意 enabled 与 timeout_ms 的既有行为逐字未变：前者以默认值 true 为初值再反序列化，
+// 因此历史数据里缺该字段时仍为启用（encoding/json 不覆盖结构体初值），
+// 只有显式写入 false 才会关闭；后者 <=0 取 30000、>60000 收敛到 60000。
 //
 // 返回值：配置结构与错误；仅查询失败（非「无此行」）时返回错误。
 func (s *Store) FetchSettings(ctx context.Context) (model.FetchSettings, error) {

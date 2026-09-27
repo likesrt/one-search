@@ -181,8 +181,8 @@ curl "$BASE_URL/api/admin/dashboard" \
 | `DELETE` | `/api/admin/tokens/{id}` | 可以 | 删除外部 API Token。 |
 | `GET` | `/api/admin/settings` | 可以 | 获取运行时设置。 |
 | `PUT` | `/api/admin/settings` | 可以 | 覆盖更新运行时设置。 |
-| `GET` | `/api/admin/fetch/settings` | 可以 | 获取「网页抓取」功能配置（`enabled` / `proxy_url` / `allow_private` / `timeout_ms`）。 |
-| `PUT` | `/api/admin/fetch/settings` | 可以 | 覆盖更新「网页抓取」功能配置；`timeout_ms` 必须在 1–60000，写入后写 `fetch.settings.update` 审计。 |
+| `GET` | `/api/admin/fetch/settings` | 可以 | 获取「网页抓取」功能配置（抓取本体 4 项 + 回退 2 项 + 缓存 4 项 + 并发 1 项，字段与默认值见 `README.md` 的抓取小节）。 |
+| `PUT` | `/api/admin/fetch/settings` | 可以 | 覆盖更新「网页抓取」功能配置；`timeout_ms` 必须在 1–60000、`fallback_min_chars` 在 0–10000、`cache_ttl_seconds` 与 `cache_error_ttl_seconds` 在 0–86400（前者 0 表示关闭缓存）、`cache_max_bytes` 在 0–104857600、`max_concurrency` 在 0–256（0 表示用默认值）。写入后写 `fetch.settings.update` 审计。 |
 | `POST` | `/api/admin/fetch/test` | 可以 | 管理台试抓接口，参数与 `POST /v1/fetch` 一致；成功与失败都写 `fetch.test` 审计。 |
 | `GET` | `/api/admin/settings/admin-api-key` | 可以 | 查看管理员 API Key 元信息（不含明文）。 |
 | `GET` | `/api/admin/settings/admin-api-key/secret` | 可以 | 读取管理员 API Key 明文。未生成时返回 404。写 `settings.admin_api_key.reveal` 审计。 |

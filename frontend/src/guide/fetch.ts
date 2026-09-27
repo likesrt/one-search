@@ -189,7 +189,7 @@ export const fetchChapter: DocChapter = {
           rows: [
             ['`enabled`', '`true`', '关闭后 `/v1/fetch` 返回 404，MCP 的工具清单也不再列出 `fetch`'],
             ['`proxy_url`', '空', '空 = 直连。可填 `http://`、`https://`、`socks5://`。容器部署时 `127.0.0.1` / `localhost` 会被自动改写为 `host.docker.internal`'],
-            ['`allow_private`', '`false`', '放行内网与环回目标。仅限完全可信的内网部署'],
+            ['`allow_private`', '`false`', '放行内网与环回目标。仅限完全可信的内网部署；**与 `fallback_enabled` 同时打开会把内网地址外发给 Tavily**'],
             ['`timeout_ms`', '`30000`', '单次抓取总超时（含重定向链），上界 `60000`'],
             ['`fallback_enabled`', '`false`', '开启后内置抓取失败时改用 Tavily 取回正文，**按量消耗第三方额度**'],
             ['`fallback_min_chars`', '`80`', '可见文本低于此值才回退。可见文本已剥离 Markdown 图片与链接目标'],
@@ -255,7 +255,7 @@ export const fetchChapter: DocChapter = {
           type: 'callout',
           tone: 'warn',
           title: '开启回退会消耗按量付费的额度',
-          text: '这就是它默认关闭的原因。Tavily 按次计费（basic 档 1–5 个 URL 算 1 个 credit），失败与命中服务端缓存都不计费，所以失败重试不会烧钱。每次成功回退的用量会记进用量表（`unit=credits`），可在仪表盘核对。'
+          text: '这就是它默认关闭的原因。Tavily 按次计费（basic 档 1–5 个 URL 算 1 个 credit），失败与命中服务端缓存都不计费，所以失败重试不会烧钱。每次成功回退的用量会记进用量表（`usage_meter_daily`，`unit=credits`），用于核对实际消耗——管理台界面暂未展示这一项，需要时可直接查该表。'
         },
         { type: 'heading', text: '回退失败不会让请求失败', level: 4 },
         {
@@ -317,6 +317,12 @@ export const fetchChapter: DocChapter = {
           tone: 'danger',
           title: 'allow_private 的安全含义',
           text: '打开它等于完全关闭内网拦截：任何持有接口令牌的人都能借本服务探测你的内网拓扑与内部接口（SSRF），云环境下还能读到实例元数据。仅在完全可信的内网部署、且确实需要抓取内部服务时开启。'
+        },
+        {
+          type: 'callout',
+          tone: 'danger',
+          title: 'allow_private 与回退同时打开时，内网地址会被外发',
+          text: '回退的「内网目标不外发」这道闸门靠的是 SSRF 护栏给出的拦截信号。`allow_private` 一开，护栏不再产生该信号，`fallback_enabled` 也随之打开时，内网 URL 会被送去 Tavily 提取——**内网地址与页面正文就此离开你的网络**。两个开关的叠加效果比单独看其中任何一个都更危险，请避免同时开启；确需如此时，至少确认内网里没有可被外部读取的敏感内容。'
         },
         { type: 'heading', text: '资源保护', level: 4 },
         {

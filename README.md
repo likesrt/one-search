@@ -168,7 +168,7 @@ key `fetch`）：
 | --- | --- | --- |
 | `enabled` | `true` | 关闭后 `/v1/fetch` 返回 404 且 MCP 不再列出 `fetch` |
 | `proxy_url` | 空 | 空 = 直连；容器部署时 `127.0.0.1` / `localhost` 会自动改写为 `host.docker.internal` |
-| `allow_private` | `false` | 放行内网目标，仅限可信内网；开启等于关闭 SSRF 防护 |
+| `allow_private` | `false` | 放行内网目标，仅限可信内网；开启等于关闭 SSRF 防护。**与 `fallback_enabled` 同时打开会把内网地址外发给 Tavily** |
 | `timeout_ms` | `30000` | 单次抓取总超时，上界 `60000` |
 | `fallback_enabled` | `false` | 开启后内置抓取失败/被拦截/内容过少时改用 Tavily extract，**按量消耗第三方额度** |
 | `fallback_min_chars` | `80` | 可见文本低于此值触发回退（Markdown 图片与链接目标不计入） |
@@ -185,6 +185,10 @@ key `fetch`）：
 （可能是 Authorization / Cookie）、以及 `raw=true`（契约是原样返回源文本，
 Markdown 无法替代）。**回退失败不会把请求变成 502**，而是返回内置抓取的结果。
 回退走 Tavily 自己的 key 级与渠道级代理，抓取功能的全局 `proxy_url` 不作用于它。
+
+> **注意**：回退的「内网目标不外发」这道闸门依赖 SSRF 护栏的拦截信号。一旦
+> `allow_private` 打开，护栏不再产生该信号，此时若 `fallback_enabled` 也开着，
+> 内网 URL 与页面正文会被送到 Tavily。两个开关不要同时打开。
 
 **缓存**落在容器内 `/app/data/fetch-cache`（可用环境变量 `FETCH_CACHE_DIR` 覆盖），
 不跨容器重启保留。缓存键含 `url | method | body | headers | raw`，

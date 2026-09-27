@@ -40,7 +40,9 @@ var fallbackStatuses = map[int]bool{
 // 拨号层与 doRequest 的字面量检查都已把内网目标包装成该哨兵错误，重复判断没有额外收益；
 // 而 AllowPrivate 为 true 属于管理员显式声明「本部署允许抓内网」，此时若仍拒绝回退，
 // 会让整套回退在测试与内网部署中完全不可用。
-// 已知代价：打开 AllowPrivate 后内网地址可能被送到第三方通道，见文档中的安全提示。
+// 已知代价：打开 AllowPrivate 后内网地址可能被送到第三方通道。该风险已在三处用户可见文档中
+// 说明：README 的抓取小节、前端「网页抓取」文档的 allow_private 小节、fetch 配置项表格；
+// 改动本函数时需同步检查这三处，不要只改代码而让文档失去警示作用。
 //
 // 参数 fetchErr 是内置抓取的传输层错误（成功时为 nil）。本函数为纯函数，无副作用。
 func fallbackBlocked(req Request, fetchErr error) fallbackGateReason {

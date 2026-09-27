@@ -645,6 +645,11 @@ func (h *Handler) listKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"keys": keys})
 }
 
+// revealKey 读取渠道密钥明文（含 Exa 团队密钥）。GET /api/admin/keys/{id}/secret
+//
+// 已有的旧接口，与本次新增的两个 reveal 接口同属「按需解密」。输出改用 writeSecretJSON：
+// 三个接口暴露的是同一类东西，只给新的两个加防缓存头会留下一个可被缓存留存的明文出口。
+// 副作用：先写 provider_key.reveal 审计再返回明文。
 func (h *Handler) revealKey(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -657,7 +662,7 @@ func (h *Handler) revealKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "admin", "provider_key.reveal", "provider_key", strconv.FormatInt(id, 10), map[string]interface{}{"provider": key.ProviderName, "alias": key.Alias})
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeSecretJSON(w, http.StatusOK, map[string]interface{}{
 		"id":              key.ID,
 		"provider_name":   key.ProviderName,
 		"alias":           key.Alias,
@@ -826,6 +831,7 @@ func (h *Handler) listTokens(w http.ResponseWriter, r *http.Request) {
 // id 非法 → 400；令牌不存在（store 返回零值结构体，ID 为 0）→ 404；
 // 迁移 0002 之前创建的老行密文为 NULL → 409（明文未留存，需重建）。
 // 明文非空即先写审计再返回；响应用 map 手工拼装，避免 model 的 json tag 变动影响明文的暴露面。
+// 输出走 writeSecretJSON：明文响应必须禁止中间代理与浏览器缓存留存，否则轮换后旧明文仍可被读回。
 func (h *Handler) revealToken(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -847,7 +853,7 @@ func (h *Handler) revealToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "admin", "api_token.reveal", "api_token", strconv.FormatInt(id, 10), map[string]interface{}{"name": token.Name, "token_prefix": token.TokenPrefix})
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeSecretJSON(w, http.StatusOK, map[string]interface{}{
 		"id":           token.ID,
 		"name":         token.Name,
 		"token_prefix": token.TokenPrefix,
@@ -949,6 +955,7 @@ func (h *Handler) getAdminAPIKey(w http.ResponseWriter, r *http.Request) {
 // 明文只在需要时由本接口按需解密，避免「查看前缀」这种高频调用也触碰明文。
 // 未生成过 Key 时 store 返回零值结构体，这里回 404 让调用方明确区分「不存在」。
 // 解密成功先写审计再返回；响应手工拼 map，避免 model 上的 json tag 变化意外放大明文的暴露面。
+// 输出走 writeSecretJSON：明文响应必须禁止中间代理与浏览器缓存留存，否则轮换后旧明文仍可被读回。
 // 无论是否已有 Key，本接口都不轮换、不改变任何状态。
 func (h *Handler) revealAdminAPIKey(w http.ResponseWriter, r *http.Request) {
 	key, err := h.store.RevealAdminAPIKey(r.Context())
@@ -961,7 +968,7 @@ func (h *Handler) revealAdminAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "admin", "settings.admin_api_key.reveal", "settings", "admin_api_key", map[string]interface{}{"key_prefix": key.KeyPrefix})
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeSecretJSON(w, http.StatusOK, map[string]interface{}{
 		"key_prefix": key.KeyPrefix,
 		"key":        key.Key,
 	})
