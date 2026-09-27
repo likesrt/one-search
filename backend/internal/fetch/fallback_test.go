@@ -112,26 +112,36 @@ func TestFallbackTriggerMatrix(t *testing.T) {
 			if got := fallback.callCount(); (got > 0) != item.wantFallback {
 				t.Fatalf("回退调用次数 = %d, 期望触发 = %v", got, item.wantFallback)
 			}
-			if !item.wantFallback {
-				if result.Channel != ChannelDirect {
-					t.Fatalf("不该回退时 channel = %q", result.Channel)
-				}
-				if result.StatusCode != item.status {
-					t.Fatalf("不该回退时状态码 = %d, 期望 %d", result.StatusCode, item.status)
-				}
-				return
-			}
-			// 回退成功必须报 200：报原始 4xx 会让 Result.Text() 在真正文前补一行假的错误码
-			if result.Channel != ChannelTavily || result.StatusCode != http.StatusOK {
-				t.Fatalf("回退成功应报 200 + channel=tavily，实际 %+v", result)
-			}
-			if !strings.Contains(result.Content, "回退正文") {
-				t.Fatalf("应返回回退正文: %q", result.Content)
-			}
-			if result.ContentType != "text/markdown" {
-				t.Fatalf("回退通道的 Content-Type 应为 text/markdown，实际 %q", result.ContentType)
-			}
+			assertTriggerOutcome(t, item.wantFallback, item.status, result)
 		})
+	}
+}
+
+// assertTriggerOutcome 断言一次触发/不触发场景的最终结果。
+//
+// 单独拆出是为了让触发矩阵的用例体保持在函数长度上限内。
+// 参数 wantFallback 表示该场景是否应走回退通道；status 是上游状态码（仅不触发时有意义）；
+// result 为 Fetch 的返回值。
+func assertTriggerOutcome(t *testing.T, wantFallback bool, status int, result Result) {
+	t.Helper()
+	if !wantFallback {
+		if result.Channel != ChannelDirect {
+			t.Fatalf("不该回退时 channel = %q", result.Channel)
+		}
+		if result.StatusCode != status {
+			t.Fatalf("不该回退时状态码 = %d, 期望 %d", result.StatusCode, status)
+		}
+		return
+	}
+	// 回退成功必须报 200：报原始 4xx 会让 Result.Text() 在真正文前补一行假的错误码
+	if result.Channel != ChannelTavily || result.StatusCode != http.StatusOK {
+		t.Fatalf("回退成功应报 200 + channel=tavily，实际 %+v", result)
+	}
+	if !strings.Contains(result.Content, "回退正文") {
+		t.Fatalf("应返回回退正文: %q", result.Content)
+	}
+	if result.ContentType != "text/markdown" {
+		t.Fatalf("回退通道的 Content-Type 应为 text/markdown，实际 %q", result.ContentType)
 	}
 }
 

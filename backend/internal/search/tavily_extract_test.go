@@ -195,31 +195,42 @@ func TestTavilyExtractProxyIsolation(t *testing.T) {
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
-			var gotProxy string
-			// 用工厂捕获构建适配器时的代理配置，这是代理真正生效的唯一入口
-			registry := provider.NewRegistry()
-			registry.RegisterFactory(model.ProviderTavily, func(cfg provider.Config) provider.Provider {
-				gotProxy = cfg.ProxyURL
-				return &extractTestProvider{content: "正文"}
-			})
-			keyPool := &orchestratorTestKeyPool{proxyModes: []string{item.keyMode}, proxyURLs: []string{item.keyProxy}}
-			store := &orchestratorTestStore{
-				settings: model.RuntimeSettings{RequestTimeoutMS: 2000},
-				providers: []model.ProviderConfig{{
-					Name: model.ProviderTavily, Enabled: true, Priority: 1, Weight: 1,
-					Settings: item.providerSet,
-				}},
-			}
-			orchestrator := NewOrchestrator(registry, keyPool, store)
-
-			if _, _, err := orchestrator.TavilyExtract(context.Background(), "https://example.com"); err != nil {
-				t.Fatalf("TavilyExtract 报错: %v", err)
-			}
+			gotProxy := tavilyExtractProxy(t, item.keyMode, item.keyProxy, item.providerSet)
 			if gotProxy != item.wantProxy {
 				t.Fatalf("回退通道的代理 = %q, 期望 %q", gotProxy, item.wantProxy)
 			}
 		})
 	}
+}
+
+// tavilyExtractProxy 跑一次 TavilyExtract 并返回构建适配器时实际收到的代理地址。
+//
+// 用工厂捕获 provider.Config.ProxyURL：那是代理真正生效的唯一入口，
+// 断言它比断言任何中间变量都更接近「出站走的是哪条代理」这个事实。
+//
+// 参数 keyMode / keyProxy 是 key 级代理三态配置；providerSettings 为渠道级设置。
+// 返回值即捕获到的代理地址；TavilyExtract 报错时立即终止用例。
+func tavilyExtractProxy(t *testing.T, keyMode, keyProxy string, providerSettings map[string]interface{}) string {
+	t.Helper()
+	var gotProxy string
+	registry := provider.NewRegistry()
+	registry.RegisterFactory(model.ProviderTavily, func(cfg provider.Config) provider.Provider {
+		gotProxy = cfg.ProxyURL
+		return &extractTestProvider{content: "正文"}
+	})
+	keyPool := &orchestratorTestKeyPool{proxyModes: []string{keyMode}, proxyURLs: []string{keyProxy}}
+	store := &orchestratorTestStore{
+		settings: model.RuntimeSettings{RequestTimeoutMS: 2000},
+		providers: []model.ProviderConfig{{
+			Name: model.ProviderTavily, Enabled: true, Priority: 1, Weight: 1,
+			Settings: providerSettings,
+		}},
+	}
+	orchestrator := NewOrchestrator(registry, keyPool, store)
+	if _, _, err := orchestrator.TavilyExtract(context.Background(), "https://example.com"); err != nil {
+		t.Fatalf("TavilyExtract 报错: %v", err)
+	}
+	return gotProxy
 }
 
 // TestTavilyExtractUsesProviderTimeout 验证 extract 复用 Tavily 渠道的 timeout_ms：
