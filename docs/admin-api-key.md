@@ -230,11 +230,14 @@ curl "$BASE_URL/api/admin/providers" \
       "weight": 1,
       "timeout_ms": 12000,
       "settings": { "key_retry_count": 3, "max_concurrency": 0 },
-      "available_keys": 1
+      "available_keys": 1,
+      "supports_anonymous_key": false
     }
   ]
 }
 ```
+
+`supports_anonymous_key` 表示该渠道无密钥时能否正常调用，仅用于管理台提示（不是数据库列，由网关按适配器能力填充）。详见 5.4 的「匿名密钥」。
 
 ### 5.3 更新 Provider 配置
 
@@ -332,6 +335,39 @@ curl -X POST "$BASE_URL/api/admin/keys" \
   }'
 ```
 
+匿名密钥示例（`key` 留空，走无密钥调用）：
+
+```bash
+curl -X POST "$BASE_URL/api/admin/keys" \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "provider_name": "context7",
+    "alias": "context7-anonymous",
+    "key": "",
+    "weight": 1
+  }'
+```
+
+#### 匿名密钥（空 `key`）
+
+`key` 传空串（或纯空白）会创建一条**匿名密钥**，语义是「该渠道的无密钥调用」。数据层**不新增字段**表示匿名 —— `key_hint == ''` 就是判据，避免同一事实两处存储导致不一致。`key` 会被正常加密入库（空串可正常加解密往返），因此无需特殊存储。
+
+匿名密钥的价值在于：它是一条普通的 `provider_keys` 行，因此**自动获得该行上的全部既有能力** —— 权重与优先级、key 级代理三态、RPM / 日 / 月配额、key 级 `base_url` 覆盖、换 key 重试。同时也受以下两条特殊处理：
+
+- **不参与自动状态机**。`RecordKeyResult` 对空 `key` 跳过状态流转：失败时不会被置为 `disabled`（`auth`）、`exhausted`（`quota_exhausted`）或 `cooling`（`rate_limited`），`cooldown_until` 也不会被设置；但 `total_successes` / `total_failures` 与 `last_used_at` 照常更新，管理台仍能看到失败统计。这样做的原因是：对不支持匿名的渠道，空 key 必然拿到 `auth` 错误，若照常流转，一条探测性的空密钥会被自动停用，而用户既没配错也没手动停用，只看到一条 `disabled` 记录、看不出原因。非空 `key` 的状态机行为完全不变。
+- **不做服务端渠道白名单**。空 `key` 对所有渠道放行，服务端不拦截也不校验渠道。中转站等场景下，未声明支持匿名的渠道也可能因自定义 `base_url` 而实际可用，因此只做提示。
+
+各渠道的匿名能力与判据：
+
+| 渠道 | `supports_anonymous_key` | 匿名时的实际行为 |
+| --- | --- | --- |
+| `context7` | `true` | 不带 `Authorization` 头请求 `GET /v3/search`（实测返回 200，与带 key 结构一致；而带无效 key 反而 401）。 |
+| `keenable` | `true` | 改打 `POST /v1/search/public` 并携带 `X-Keenable-Title: OneSearchRelay`（该头是应用标识而非凭据，取值写死、不可配置）；**不再发送 `X-API-Key`**，因为实测带空 `X-API-Key` 头与完全不带鉴权同样被上游判为 401。限流为 1000 次/小时、10 次/秒，**按 IP 且为共享池**，额度不受网关控制；匿名调用不消耗 credits。 |
+| 其余七家 | `false` | 照常发请求但不带凭据，上游返回 401，表现为 `auth` 失败。 |
+
+`supports_anonymous_key` 由渠道列表接口 `GET /api/admin/providers`（以及同一实现下的 `GET /v1/providers`）下发。它**不是数据库列**，而是在 `ListProviders` 之后由 Handler 按 registry 现场填充；**仅用于管理台提示与创建时的确认框，不参与任何放行判断**。字段缺省或后端未填充时视为 `false`，即「未声明支持匿名」。注意 `GET /api/admin/dashboard` 的 `providers` 字段是数据库行的直接投影，**不含**该字段（那里也不用于渠道能力提示）。相关风险与限制见管理台的「渠道配置详解」文档章节。
+
 Brave 示例（默认地址含 `/res/v1` 路径前缀，覆盖时需写全）：
 
 ```bash
@@ -381,7 +417,7 @@ curl -X POST "$BASE_URL/api/admin/keys" \
 | --- | --- |
 | `provider_name` | 内置 Provider 名：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`、`context7`。 |
 | `alias` | Key 别名。同一 Provider 下唯一。 |
-| `key` | 上游搜索 API Key，会加密存储。 |
+| `key` | 上游搜索 API Key，会加密存储。**允许留空**：空串（或纯空白）表示一条**匿名密钥**，即「无密钥调用」，详见下方「匿名密钥」。 |
 | `base_url` | 可选。该 Key 专属的基础 URL，留空则回退到该渠道（Provider）的 `base_url`。非空时必须是 `http://` 或 `https://` 开头的完整地址，否则返回 400。**覆盖值是整段替换根地址**：Brave 默认地址为 `https://api.search.brave.com/res/v1`，指向中转站时必须写成 `<host>/res/v1`，否则会 404；`context7` 默认地址为 `https://context7.com/api`（端点 `/v3/search` 由适配器拼接，不要写进 `base_url`）；其余渠道默认地址不含路径前缀。**以 `#` 开头表示该地址即完整端点**，网关不再拼接适配器自己的路径，例如 `#https://relay.example.com/proxy/tavily/search`；`#` 会被剥掉再校验，`#` 后仍需是合法的 http/https 绝对地址。Jina 的搜索词拼在 URL 路径中，保存带 `#` 的地址会返回 400。 |
 | `proxy_mode` | 可选。该 Key 的代理模式，取值 `inherit`（默认，跟随渠道级代理）、`direct`（强制直连，忽略渠道级代理）、`custom`（使用该 Key 自己的 `proxy_url`）。缺省或非法值按 `inherit` 处理。 |
 | `proxy_url` | 可选。仅 `custom` 模式生效的代理地址；地址为空时回退渠道级代理，而不是强制直连。未写协议头会自动补 `http://`，容器内会把 `127.0.0.1`/`localhost` 改写为 `host.docker.internal`。 |
