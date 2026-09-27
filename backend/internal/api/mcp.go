@@ -412,6 +412,11 @@ func (h *Handler) mcpAuthContext(r *http.Request) (context.Context, int, string,
 // 搜索与网页抓取。只写搜索会让模型在需要读某个具体页面时不知道还有 fetch 可用，
 // 从而退化为臆造内容。
 //
+// instructions 还要求模型按「先文档、后补充」的顺序取数：涉及具体库/框架/SDK/API 的用法时，
+// 先显式传 providers:["context7"] 取权威文档与代码示例，结果为空（该库未被收录）再用其它渠道补充。
+// 之所以写成调用序列而不是服务端加权，是因为两类结果混排后强行置顶会让 score 的含义在渠道间不一致
+// （见 mergeResults 的排序口径）；且 context7 对时事、通用网页问题不适用，必须由模型自行判别主题。
+//
 // instructions 额外要求模型为 search 显式传 limit >= mcpRecommendedLimit。
 // 这只是一句「建议」：MCP 规范把 instructions 定义为可选的提示（客户端 MAY 注入系统提示词），
 // 客户端与模型都可能忽略，服务端也没有据此做任何强制。要真正收敛取数条数需改编排层
@@ -431,7 +436,7 @@ func mcpInitializeResult(params json.RawMessage) map[string]interface{} {
 			"title":   "One Search Relay",
 			"version": "0.1.0",
 		},
-		"instructions": fmt.Sprintf("Use the search tool to run live web searches on the public internet and get ranked results with titles, URLs and snippets. Call it whenever the user asks about recent events, current or up-to-date facts, or anything that requires information from the web. Use the fetch tool to read a specific URL — a page the user linked or a result returned by search — and get its content as compact Markdown; it fetches the page over plain HTTP and does not run JavaScript, so client-rendered pages come back empty. Always pass an explicit limit of at least %d to the search tool — a smaller limit discards results that were already fetched from the providers and billed, and you can always ignore the extra ones.", mcpRecommendedLimit),
+		"instructions": fmt.Sprintf("Use the search tool to run live web searches on the public internet and get ranked results with titles, URLs and snippets. Call it whenever the user asks about recent events, current or up-to-date facts, or anything that requires information from the web. Use the fetch tool to read a specific URL — a page the user linked or a result returned by search — and get its content as compact Markdown; it fetches the page over plain HTTP and does not run JavaScript, so client-rendered pages come back empty. When the question is about how to use a specific library, framework, SDK or API, call the search tool first with providers: [\"context7\"] to get authoritative documentation and runnable code examples; if that returns no results — the library is not indexed — then fall back to the other providers (or plain default routing). Context7 only covers documentation of indexed open-source libraries, so it is not applicable to news, current events, or general web questions. Always pass an explicit limit of at least %d to the search tool — a smaller limit discards results that were already fetched from the providers and billed, and you can always ignore the extra ones.", mcpRecommendedLimit),
 	}
 }
 
@@ -465,6 +470,16 @@ func negotiateMCPProtocolVersion(params json.RawMessage) string {
 // 其中只有 query 为必填。description 直接决定模型是否选中本工具，必须显式点明
 // 「实时联网搜索」并给出适用场景，避免被误判为本地知识库检索。
 //
+// description 的第二句交代文档检索能力（context7）：tools/list 的 description 才是
+// 模型判断「这个工具能不能干这件事」的主要依据，部分客户端只注入工具名与 description，
+// 参数级 schema 被压缩或延后给出。只写联网搜索会让模型在遇到「某库怎么用」时
+// 压根想不到本工具还能查文档，于是退化为臆造或改用 fetch 逐个抓页面。
+//
+// providers 的描述除渠道定位外，还刻意写明「合法值是全集、不等于可用集」：
+// enum 只是 schema 层的可取值清单，服务端不据此校验，被管理员停用或缺 key 的渠道
+// 会静默跳过或报错（见 filterEnabledProviders 与 keyPool.Acquire），模型若不被告知，
+// 会把「没结果」误判成「这个渠道查不到」，反复重试同一个不可用渠道。
+//
 // limit 的描述刻意写成「建议至少 mcpRecommendedLimit」而非只报上限：schema 的
 // minimum 只能拦住 0，拦不住「传 3」。上限值仅为文档性声明，服务端编排并不做全局钳制
 // （渠道级 request_result_limit 与各适配器各自设限）。
@@ -474,7 +489,7 @@ func mcpSearchToolSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "search",
 		"title":       "One Search",
-		"description": "Search the live public web and return ranked results with titles, URLs and snippets. Use this tool for recent events, up-to-date facts, or any question that needs information from the open internet.",
+		"description": "Search the live public web and return ranked results with titles, URLs and snippets. Use this tool for recent events, up-to-date facts, or any question that needs information from the open internet. It also reaches open-source library and framework documentation through the context7 provider: for questions about how a specific library, framework, SDK or API is used, pass providers: [\"context7\"] to get authoritative documentation and runnable code examples.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -484,7 +499,7 @@ func mcpSearchToolSchema() map[string]interface{} {
 				},
 				"providers": map[string]interface{}{
 					"type":        "array",
-					"description": "Optional providers to use. Defaults to runtime settings.",
+					"description": "Optional providers to use; defaults to runtime settings. Valid values: exa, you, jina, tavily, firecrawl, serper, brave, keenable (general web search) and context7 (open-source library, framework and SDK documentation with runnable code examples). This is the full set, not a guarantee of availability: a provider the operator disabled or left without an API key is skipped or returns an error, so fall back to the default routing instead of retrying it.",
 					"items":       map[string]interface{}{"type": "string", "enum": model.DefaultProviders},
 				},
 				"mode": map[string]interface{}{

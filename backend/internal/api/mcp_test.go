@@ -223,6 +223,104 @@ func TestMCPLimitAdviceIsConsistentAcrossInstructionsAndSchema(t *testing.T) {
 	}
 }
 
+// TestMCPGuidesModelToContext7First 验证「文档渠道优先」的引导同时落在两处：
+// initialize 的 instructions 与 search 工具 schema 里 providers 的 description。
+// 只写其中一处不够：enum 里多一个陌生的 context7 而没有说明时，模型不会主动选它。
+//
+// 边界条件：只断言「提到 context7」这一定性事实，不做逐字比对，避免文案微调即失败。
+// TestMCPGuidesModelToContext7First 验证三段引导文案里都提到了 context7。
+//
+// 覆盖 instructions、search 工具的 description 与 providers 字段的 description 三处：
+// 三处的失效方式互不相同 —— instructions 客户端可以整段丢弃，工具 description 可能被
+// 客户端截断，providers 字段的 description 只在 schema 全量下发时才可见，
+// 因此任一处的引导都不足以单独兜底，必须分别断言。
+func TestMCPGuidesModelToContext7First(t *testing.T) {
+	h := &Handler{}
+	r := chi.NewRouter()
+	h.mountMCP(r, "/mcp")
+
+	initRec := mcpPost(t, r, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`)
+	if !strings.Contains(mcpInstructions(t, initRec), model.ProviderContext7) {
+		t.Fatalf("instructions 未提及 context7")
+	}
+
+	toolsResp := mcpListTools(t, r)
+	tool, ok := mcpToolByName(toolsResp.Result.Tools, "search")
+	if !ok {
+		t.Fatalf("search tool missing: %+v", toolsResp.Result.Tools)
+	}
+	if !strings.Contains(tool.Description, model.ProviderContext7) {
+		t.Fatalf("search 工具 description 未提及 context7: %q", tool.Description)
+	}
+	if !strings.Contains(mcpProvidersDescription(t, tool), model.ProviderContext7) {
+		t.Fatalf("providers 描述未提及 context7")
+	}
+}
+
+// TestMCPProvidersDescriptionWarnsEnumIsNotAvailability 锁定 providers 描述里的
+// 「合法值是全集，不等于可用集」这句免责声明。
+//
+// 为什么值得单独立一条用例：enum 只是 schema 层的可取值清单，服务端并不据此校验，
+// 被停用或缺 key 的渠道会静默跳过或报错。一旦这句被删（例如为了缩短文案），
+// 模型会把「这个渠道没结果」误判成「这个渠道查不到」，反复重试同一个不可用渠道，
+// 而这种回归在功能测试里完全看不出来 —— 只有文案层面能挡住。
+func TestMCPProvidersDescriptionWarnsEnumIsNotAvailability(t *testing.T) {
+	h := &Handler{}
+	r := chi.NewRouter()
+	h.mountMCP(r, "/mcp")
+
+	toolsResp := mcpListTools(t, r)
+	tool, ok := mcpToolByName(toolsResp.Result.Tools, "search")
+	if !ok {
+		t.Fatalf("search tool missing: %+v", toolsResp.Result.Tools)
+	}
+	description := mcpProvidersDescription(t, tool)
+	// 只断言「不保证可用」这层语义的关键措辞，不做逐字比对，避免文案微调即失败。
+	if !strings.Contains(description, "not a guarantee") {
+		t.Fatalf("providers 描述缺少「枚举不等于可用」的说明: %q", description)
+	}
+	if !strings.Contains(description, "API key") {
+		t.Fatalf("providers 描述未说明缺 key 的渠道不可用: %q", description)
+	}
+}
+
+// mcpInstructions 从 initialize 响应体里取出 instructions 文本。
+// 参数 rec 为 initialize 的响应记录；解析失败或字段缺失时终止测试。
+func mcpInstructions(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var resp struct {
+		Result struct {
+			Instructions string `json:"instructions"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode initialize response: %v", err)
+	}
+	if resp.Result.Instructions == "" {
+		t.Fatalf("instructions 为空: %s", rec.Body.String())
+	}
+	return resp.Result.Instructions
+}
+
+// mcpProvidersDescription 从 search 工具的 inputSchema 里取出 providers 字段的 description。
+// 参数 tool 为 search 工具定义；schema 结构不符或 description 不是字符串时终止测试并打印实际结构。
+func mcpProvidersDescription(t *testing.T, tool mcpToolSchema) string {
+	t.Helper()
+	properties, ok := tool.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("tool properties missing: %+v", tool.InputSchema)
+	}
+	providers, ok := properties["providers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("providers schema missing: %+v", properties)
+	}
+	description, ok := providers["description"].(string)
+	if !ok || description == "" {
+		t.Fatalf("providers description missing: %+v", providers)
+	}
+	return description
+}
+
 // TestMCPToolsListIncludesFetchWhenEnabled 验证启用后清单同时含 search 与 fetch。
 func TestMCPToolsListIncludesFetchWhenEnabled(t *testing.T) {
 	h := &Handler{}
