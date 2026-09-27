@@ -64,6 +64,27 @@ func corsMiddleware(origins []string) func(http.Handler) http.Handler {
 	}
 }
 
+// securityHeadersMiddleware 为所有响应加上安全相关的头。
+//
+// no-store 是这里唯一有实际后果的一项，其余是浏览器侧的加固。加它的原因是
+// HTTP 的默认规则与直觉相反：GET 且状态码属于「启发式可缓存」时（200、203、204、
+// 206、300、301、308、404、405、410、414、501，见 RFC 9110 §15.1），
+// 即使响应里没有任何缓存头，缓存也被允许存储并直接复用 —— 「没写缓存头」不等于
+// 「不缓存」。本服务的接口绝大多数是 GET 且返回 200，对外接口带用量与额度数据、
+// 管理接口带渠道路由与凭据元信息，都不该被留在任何一层缓存里。
+//
+// 不用 no-cache 而用 no-store：前者只要求复用前回源校验，响应仍会落盘；
+// 后者禁止存储，是这里真正需要的语义。
+//
+// 为什么不依赖 RFC 9111 §3.5「带 Authorization 头的请求，共享缓存不得复用其响应」：
+// 那条只约束 shared cache，不约束浏览器自己的私有缓存；而且它要求请求确实带上该头，
+// 一旦调用方把令牌放进查询串（或用 Cookie 鉴权）就不再成立。请求级规则挡不住的部分，
+// 由响应级的 no-store 兜住。
+//
+// 注意本中间件不覆盖 nginx 直接返回的静态资源（前端 dist 里的 JS/CSS），
+// 那些是公开内容，缓存反而有益；nginx 的 add_header 也未受影响。
+//
+// 副作用：写入响应头（在业务处理函数之前，因此处理函数显式设置的同名头会覆盖它）。
 func securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -71,6 +92,7 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
+		w.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
 }
