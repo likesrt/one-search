@@ -112,43 +112,6 @@ ensure_database() {
   fi
 }
 
-# nginx_value_or_default 校验单个 nginx 配置值，为空或非法时回落到默认值。
-#
-# 参数：$1 待校验值（可为空）；$2 默认值；$3 变量名（仅用于日志）。
-# 返回：合法的配置值，保证非空。
-# 为什么必须校验而不是直接透传：这些值会被拼进 nginx.conf，非法值会让 nginx 启动失败；
-# 而 nginx 与后端同处一个容器，失败意味着整个容器起不来 —— 代价远大于「退回默认值继续跑」。
-nginx_value_or_default() {
-  # 形参不能省略实参：set -u 下缺参会直接终止，
-  # 而本函数的存在意义正是「容忍缺失」，因此这里显式取空串兜底
-  value="${1:-}"
-  default="$2"
-  name="$3"
-  if [ -z "$value" ]; then
-    printf '%s' "$default"
-    return 0
-  fi
-  # nginx 合法取值：纯数字（client_max_body_size 的字节数），或数字后跟单个单位字母。
-  # 尺寸单位是 k/m/g，时间单位是 s/m/h/d（两者共用 m，故合并成一组字母）。
-  # 判定方式是先剥掉可能的单位字母，再要求余下部分全为数字 —— 这样 "5242880"、"5m"、
-  # "130s" 通过，而 "5*1024*1024"、"abc"、"5m|s|65s|" 被拒。
-  # 必须白名单式校验：这些值会被拼进 nginx 配置，非法值不仅让 nginx 起不来
-  # （与后端同容器，等于整个容器起不来），还可能夹带 sed 分隔符破坏模板替换。
-  core="$value"
-  case "$value" in
-    *[kKmMgGsShHdD]) core="${value%?}" ;;
-  esac
-  case "$core" in
-    ''|*[!0-9]*)
-      log "invalid $name='$value', falling back to $default"
-      printf '%s' "$default"
-      ;;
-    *)
-      printf '%s' "$value"
-      ;;
-  esac
-}
-
 # nginx_proxy_timeout_default 由后端写超时推导 nginx 的反代超时。
 #
 # 为什么要有这层推导：nginx 的 proxy_read_timeout 约束「后端多久没吐数据就断开」，
@@ -171,11 +134,11 @@ nginx_proxy_timeout_default() {
 
 # nginx_body_size_default 由后端请求体上限推导 nginx 的 client_max_body_size。
 #
-# 为什么要有这层推导：nginx 在外层，client_max_body_size 先于后端 bodyLimitMiddleware 生效，
-# 若前者更小，调大 .env 里的 REQUEST_BODY_LIMIT_BYTES 完全看不到效果（请求先被 nginx 413）。
-# 直接沿用同一数值，保证两层口径一致。
+# 为什么直接沿用而非另设变量：nginx 在外层，client_max_body_size 先于后端
+# bodyLimitMiddleware 生效，若前者更小，调大 REQUEST_BODY_LIMIT_BYTES 完全看不到
+# 效果（请求先被 nginx 413）。两者是同一个语义的口径，共用一个变量才不会失配。
 #
-# 返回：字节数字符串；未显式配置 REQUEST_BODY_LIMIT_BYTES 时返回 1m（出厂值）。
+# 返回：字节数字符串；未配置或值非法时返回 1m（与后端默认值一致）。
 # 无副作用。
 nginx_body_size_default() {
   bytes="${REQUEST_BODY_LIMIT_BYTES:-}"
@@ -187,35 +150,29 @@ nginx_body_size_default() {
 
 # render_nginx_config 把 nginx 配置模板渲染成最终配置。
 #
-# 背景：nginx 自身不读环境变量，而它的体积/超时限制与后端成对生效（见上面两个推导函数）。
+# 背景：nginx 自身不读环境变量，而它的体积/超时限制与后端成对生效。
 # 配置若在构建期就烤进镜像，就会出现「改了 .env 却不生效」。因此在启动 nginx 前
-# 做一次占位符替换，让环境变量成为唯一的配置入口。
+# 做一次占位符替换。
 #
-# 每个占位符的取值优先级：显式指定的 NGINX_* 变量 > 从后端配置推导 > 出厂默认。
-# 侧面：写出 $NGINX_CONF_OUT；渲染结果经 nginx -t 校验，失败时退回全默认值再渲染一次。
+# 设计取舍：nginx 侧不引入独立可调项。client_max_body_size 直接沿用后端的
+# REQUEST_BODY_LIMIT_BYTES（它在外层先拦，只有口径一致才不会白配），
+# proxy_read/send_timeout 由 SERVER_WRITE_TIMEOUT_MS 加 5s 余量推导。
+# 这样配置文件里只需出现后端那一份变量，不会多出一组「看起来可调、实际必须同步」的孪生项。
+# 代价是要让 nginx 独立于后端更宽或更严时得改这个函数（属于改代码，属有意为之）。
+#
+# 取值来源均为后端已校验过的变量，故不再重复校验，也不需要回退分支。
+# 侧面：写出 $NGINX_CONF_OUT；渲染结果经 nginx -t 校验，失败即终止启动
+# （能失败说明模板或本函数被改坏，属构建期问题，早失败好过带病运行）。
 # 副作用：覆盖 $NGINX_CONF_OUT 文件。
 render_nginx_config() {
-  # 注意：本脚本以 set -eu 运行，未设置的变量直接引用会终止启动，
-  # 因此这四项一律用 ${VAR:-} 取「可能为空」的值，再由 nginx_value_or_default 补默认
-  body=$(nginx_value_or_default "${CLIENT_MAX_BODY_SIZE:-}" "$(nginx_body_size_default)" "CLIENT_MAX_BODY_SIZE")
-  connect=$(nginx_value_or_default "${NGINX_PROXY_CONNECT_TIMEOUT:-}" "65s" "NGINX_PROXY_CONNECT_TIMEOUT")
-  read_timeout=$(nginx_value_or_default "${NGINX_PROXY_READ_TIMEOUT:-}" "$(nginx_proxy_timeout_default)" "NGINX_PROXY_READ_TIMEOUT")
-  send_timeout=$(nginx_value_or_default "${NGINX_PROXY_SEND_TIMEOUT:-}" "$(nginx_proxy_timeout_default)" "NGINX_PROXY_SEND_TIMEOUT")
-
-  write_nginx_config "$body" "$connect" "$read_timeout" "$send_timeout"
-  # 语法自检：模板被改坏或变量含特殊字符时能在这里拦住，
-  # 而不是等到 nginx 启动失败、整个容器退出
-  if nginx -t -c "$NGINX_TEST_WRAPPER" >/dev/null 2>&1; then
-    log "nginx config ready: body=$body connect=$connect read=$read_timeout send=$send_timeout"
-    return 0
-  fi
-  log "nginx config invalid, retrying with factory defaults"
-  write_nginx_config "1m" "65s" "65s" "65s"
+  body="$(nginx_body_size_default)"
+  timeout="$(nginx_proxy_timeout_default)"
+  write_nginx_config "$body" "65s" "$timeout" "$timeout"
   if ! nginx -t -c "$NGINX_TEST_WRAPPER" >/dev/null 2>&1; then
-    log "nginx config still invalid after fallback; aborting"
+    log "nginx config invalid; aborting"
     exit 1
   fi
-  log "nginx config ready: factory defaults"
+  log "nginx config ready: body=$body read=$timeout send=$timeout"
 }
 
 # write_nginx_config 按给定四个值渲染模板并写出最终配置。
