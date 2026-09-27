@@ -1,5 +1,5 @@
 services:
-  app:
+  one-search:
     build:
       context: .
       dockerfile: Dockerfile
