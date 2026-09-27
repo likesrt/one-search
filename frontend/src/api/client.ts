@@ -247,15 +247,34 @@ export interface FetchSettings {
   allow_private: boolean
   /** 单次抓取超时（毫秒），上界 60000（受反向代理 65s 超时约束） */
   timeout_ms: number
+  /** 兜底回退总开关；开启后内置抓取失败或内容过少时会改用 Tavily extract，并按量消耗第三方额度 */
+  fallback_enabled: boolean
+  /** 触发回退的可见文本长度阈值（按 Unicode 码点计，已剥离 Markdown 图片与链接目标）；默认 80 */
+  fallback_min_chars: number
+  /** 正常内容的缓存时长（秒），0 表示关闭缓存；窗口内返回的是上一次抓取的内容 */
+  cache_ttl_seconds: number
+  /** 上游返回 401/403/429 时的缓存时长（秒）；避免几分钟内反复撞同一道门禁 */
+  cache_error_ttl_seconds: number
+  /** 单条缓存上限（字节），超过则不缓存该条；默认 3145728（3MB） */
+  cache_max_bytes: number
+  /** 缓存目录总量上限（字节），超出时按文件修改时间从旧到新淘汰；默认 268435456（256MB） */
+  cache_max_total_bytes: number
+  /** 单进程同时在飞的抓取上限（含内置抓取与回退），超出的请求排队等待；默认 32 */
+  max_concurrency: number
 }
 
 /** 单次抓取的结果，对应后端 fetch.Result。 */
 export interface FetchResult {
   url: string
   method: string
-  /** 上游响应状态码：抓到 4xx/5xx 页面本身仍算成功抓取，状态码在此透出 */
+  /**
+   * 上游响应状态码：抓到 4xx/5xx 页面本身仍算成功抓取，状态码在此透出。
+   * 内容来自回退通道（channel 为 tavily）时恒为 200。
+   */
   status_code: number
   content_type: string
+  /** 内容来自哪条通道：direct（内置抓取）或 tavily（兜底回退） */
+  channel: string
   /** 归一化并按 max_length 截断后的内容（含续读提示） */
   content: string
   truncated: boolean

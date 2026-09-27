@@ -101,7 +101,7 @@
             <h2>结果</h2>
             <p v-if="result">
               状态码 {{ result.status_code }} · {{ result.content_type || '未声明 Content-Type' }} ·
-              {{ result.total_length }} 字符
+              {{ result.total_length }} 字符 · 通道 {{ channelLabel(result.channel) }}
             </p>
             <p v-else>抓取失败</p>
           </div>
@@ -123,7 +123,7 @@
         </template>
       </section>
 
-      <!-- 配置：只 4 个字段，不值得上页内 tab -->
+      <!-- 配置：抓取本体 4 项 + 回退 2 项 + 缓存 5 项 -->
       <section class="soft-card fetch-card">
         <div class="sec-hd">
           <div>
@@ -162,6 +162,96 @@
               <span class="hint">允许抓取 127.0.0.1、10.x、192.168.x 等内网地址</span>
             </div>
             <el-switch v-model="settings.allow_private" />
+          </div>
+
+          <!-- 回退：会消耗按量付费的第三方额度，因此默认关闭、单独成组 -->
+          <div class="field field-switch field-full">
+            <div>
+              <label>回退兜底 (Tavily)</label>
+              <span class="hint">
+                内置抓取失败、被 401/403/429 拦截或内容过少时，改用 Tavily 取回整页正文。
+                会按量消耗第三方额度，仅在需要时开启。
+              </span>
+            </div>
+            <el-switch v-model="settings.fallback_enabled" />
+          </div>
+          <div v-if="settings.fallback_enabled" class="field">
+            <label>触发阈值 (可见字符)</label>
+            <el-input-number
+              v-model="settings.fallback_min_chars"
+              :min="1"
+              :max="10000"
+              :step="20"
+              controls-position="right"
+            />
+            <span class="hint">
+              正文可见文本低于此值才回退（Markdown 图片与链接目标不计入）。
+              404 与全部 5xx 不触发：重试无意义，也不该消耗额度。
+            </span>
+          </div>
+
+          <div class="field">
+            <label>缓存时长 (秒)</label>
+            <el-input-number
+              v-model="settings.cache_ttl_seconds"
+              :min="0"
+              :max="86400"
+              :step="30"
+              controls-position="right"
+            />
+            <span class="hint">
+              同一 URL 在该窗口内直接返回缓存内容，不再打上游。0 表示关闭缓存。
+              窗口内看不到页面更新，属正常取舍。
+            </span>
+          </div>
+          <div class="field">
+            <label>错误态缓存 (秒)</label>
+            <el-input-number
+              v-model="settings.cache_error_ttl_seconds"
+              :min="1"
+              :max="86400"
+              :step="30"
+              controls-position="right"
+            />
+            <span class="hint">上游返回 401/403/429 时的缓存时长，避免几分钟内反复撞同一道门禁</span>
+          </div>
+          <div class="field">
+            <label>单条缓存上限 (字节)</label>
+            <el-input-number
+              v-model="settings.cache_max_bytes"
+              :min="0"
+              :max="104857600"
+              :step="1048576"
+              controls-position="right"
+            />
+            <span class="hint">超过该体积的结果不写缓存（默认 3145728，即 3MiB）</span>
+          </div>
+          <div class="field">
+            <label>缓存总量上限 (字节)</label>
+            <el-input-number
+              v-model="settings.cache_max_total_bytes"
+              :min="0"
+              :max="10737418240"
+              :step="268435456"
+              controls-position="right"
+            />
+            <span class="hint">
+              缓存目录总量上限，超出时每小时按文件修改时间从旧到新淘汰（默认 268435456，即 256MiB）
+            </span>
+          </div>
+          <div class="field">
+            <label>并发上限</label>
+            <el-input-number
+              v-model="settings.max_concurrency"
+              :min="1"
+              :max="256"
+              :step="4"
+              controls-position="right"
+            />
+            <span class="hint">
+              单进程同时在飞的抓取上限（含内置抓取与回退），超出的请求排队等待。
+              缓存命中不占用名额。
+            </span>
           </div>
         </div>
 
@@ -214,8 +304,9 @@ const dirty = computed(() => {
 /**
  * 归一化配置后再序列化，用于脏检查比较。
  *
- * timeout_ms 缺省时补 30000：后端读不到配置行时会返回内置默认值，但历史数据可能缺字段，
- * 不补齐会让「看起来没改」的配置被判为脏。
+ * 每一项都要在这里补齐默认值：后端读不到配置行时会返回内置默认值，但历史数据可能缺字段，
+ * 不补齐会让「看起来没改」的配置被判为脏。反过来，漏掉任何一个字段都会让改动后的配置
+ * 与基线相等，「保存」按钮点不亮 —— 这是本函数最容易出错的地方。
  * @param value 当前配置
  * @returns 稳定的 JSON 字符串
  */
@@ -224,7 +315,15 @@ function serialize(value: FetchSettings): string {
     enabled: Boolean(value.enabled),
     proxy_url: (value.proxy_url || '').trim(),
     allow_private: Boolean(value.allow_private),
-    timeout_ms: Number(value.timeout_ms) || 30000
+    timeout_ms: Number(value.timeout_ms) || 30000,
+    fallback_enabled: Boolean(value.fallback_enabled),
+    fallback_min_chars: Number(value.fallback_min_chars) || 80,
+    // 缓存时长允许为 0（关闭缓存），因此不能用 || 兜底，否则 0 会被改成默认值
+    cache_ttl_seconds: Number.isFinite(Number(value.cache_ttl_seconds)) ? Number(value.cache_ttl_seconds) : 120,
+    cache_error_ttl_seconds: Number(value.cache_error_ttl_seconds) || 120,
+    cache_max_bytes: Number(value.cache_max_bytes) || 3145728,
+    cache_max_total_bytes: Number(value.cache_max_total_bytes) || 268435456,
+    max_concurrency: Number(value.max_concurrency) || 32
   })
 }
 
@@ -399,6 +498,20 @@ async function continueReading() {
 }
 
 /**
+ * 把结果里的通道标识翻译为界面文案。
+ *
+ * 未识别的值原样显示：通道是后端新增的枚举，前端遇到没见过的取值时
+ * 直接透出比显示「未知」更有助于排查版本不匹配。
+ * @param channel 后端返回的 channel 字段
+ * @returns 中文通道名或原值
+ */
+function channelLabel(channel: string): string {
+  if (channel === 'tavily') return 'Tavily 回退'
+  if (channel === 'direct') return '内置抓取'
+  return channel || '内置抓取'
+}
+
+/**
  * 复制文本到剪贴板；内容为空时直接返回，避免写入空串。
  * @param text 待复制文本
  */
@@ -408,11 +521,46 @@ async function copyText(text: string) {
   ElMessage.success('已复制')
 }
 
+/**
+ * 校验配置在保存前是否越界。
+ *
+ * 只拦「会引发资源问题」的越界值，与后端 validateFetchSettings 的口径保持一致：
+ * cache_ttl_seconds 允许为 0（关闭缓存的合法写法），因此判据是 `< 0` 而不是 `<= 0`。
+ * 提前在前端拦住是为了给出即时提示，服务端的校验仍是唯一的最终依据。
+ * @param value 待保存的配置
+ * @returns 错误提示文案；全部合法时返回空串
+ */
+function settingsError(value: FetchSettings): string {
+  if (value.timeout_ms < 1 || value.timeout_ms > 60000) {
+    return '超时必须在 1 到 60000 毫秒之间'
+  }
+  if (value.fallback_min_chars < 1 || value.fallback_min_chars > 10000) {
+    return '回退阈值必须在 1 到 10000 之间'
+  }
+  if (value.cache_ttl_seconds < 0 || value.cache_ttl_seconds > 86400) {
+    return '缓存时长必须在 0 到 86400 秒之间（0 表示关闭缓存）'
+  }
+  if (value.cache_error_ttl_seconds < 1 || value.cache_error_ttl_seconds > 86400) {
+    return '错误态缓存必须在 1 到 86400 秒之间'
+  }
+  if (value.cache_max_bytes < 0 || value.cache_max_bytes > 104857600) {
+    return '单条缓存上限必须在 0 到 104857600 字节之间'
+  }
+  if (value.cache_max_total_bytes < 0) {
+    return '缓存总量上限不能为负数'
+  }
+  if (value.max_concurrency < 1 || value.max_concurrency > 256) {
+    return '并发上限必须在 1 到 256 之间'
+  }
+  return ''
+}
+
 /** 保存配置：命令式校验（早退 + 警告）后用服务端回包重置脏检查基线。 */
 async function save() {
   if (!settings.value || !dirty.value) return
-  if (settings.value.timeout_ms < 1 || settings.value.timeout_ms > 60000) {
-    ElMessage.warning('超时必须在 1 到 60000 毫秒之间')
+  const invalid = settingsError(settings.value)
+  if (invalid) {
+    ElMessage.warning(invalid)
     return
   }
   saving.value = true
