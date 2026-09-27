@@ -11,12 +11,17 @@ const (
 	ProviderSerper    = "serper"
 	ProviderBrave     = "brave"
 	ProviderKeenable  = "keenable"
+	ProviderContext7  = "context7"
 )
 
 // DefaultProviders 是内置渠道的默认顺序。
 // 顺序对外可见（MCP 的 enum 与文档都按此顺序列举），新增渠道只能追加到末尾，
 // 否则会改变既有默认路由的优先级语义。
-var DefaultProviders = []string{ProviderExa, ProviderYou, ProviderJina, ProviderTavily, ProviderFirecrawl, ProviderSerper, ProviderBrave, ProviderKeenable}
+//
+// 注意：本列表只决定 MCP providers enum 能列出的渠道，不等于运行期默认路由。
+// context7 在此列出仅是让模型能传这个值；settings.default_providers 未被迁移改写，
+// 因此默认搜索仍只走前 8 家，context7 只在显式 providers:["context7"] 时参与。
+var DefaultProviders = []string{ProviderExa, ProviderYou, ProviderJina, ProviderTavily, ProviderFirecrawl, ProviderSerper, ProviderBrave, ProviderKeenable, ProviderContext7}
 
 type SearchMode string
 

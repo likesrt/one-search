@@ -534,11 +534,11 @@ func (o *Orchestrator) refreshOfficialQuota(key model.APIKey, proxyURL string) {
 
 // autoRefreshOfficialQuota 判断某渠道是否参与搜索后的自动额度刷新。
 // 默认 true（多数渠道的官方额度可查且值得刷新），只在明确「查不出额度」时才返回 false：
-// serper 无官方余额接口、brave 的查询要消耗一次真实请求、keenable 无官方额度接口。
+// serper 无官方余额接口、brave 的查询要消耗一次真实请求、keenable 与 context7 无官方额度接口。
 // 漏加渠道会让它每 5 分钟自动查一次并把 unsupported 反复写库（功能无害但属于脏写）。
 func autoRefreshOfficialQuota(providerName string) bool {
 	switch providerName {
-	case model.ProviderSerper, model.ProviderBrave, model.ProviderKeenable:
+	case model.ProviderSerper, model.ProviderBrave, model.ProviderKeenable, model.ProviderContext7:
 		return false
 	default:
 		return true

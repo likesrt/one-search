@@ -187,6 +187,13 @@ func buildProviderRegistry(cfg config.Config) (*provider.Registry, error) {
 		}
 		return provider.NewKeenableProvider(providerCfg)
 	})
+	registry.RegisterFactory(model.ProviderContext7, func(providerCfg provider.Config) provider.Provider {
+		providerCfg.UserAgent = cfg.UpstreamUserAgent
+		if providerCfg.Timeout == 0 {
+			providerCfg.Timeout = cfg.RequestTimeout
+		}
+		return provider.NewContext7Provider(providerCfg)
+	})
 	return registry, nil
 }
 

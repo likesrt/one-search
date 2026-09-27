@@ -151,20 +151,38 @@ func (p *HTTPProvider) newGETRequest(ctx context.Context, endpoint string, param
 	return request, nil
 }
 
+// decodeResponse 读取并解析上游响应体，把 >=400 的状态码统一转成 *Error。
+// 参数 response 必须非 nil 且 Body 可读（本函数负责关闭 Body）。
+// 返回值：2xx 且 JSON 可解析时为 payload；否则 payload 为 nil 并返回 *Error。
+// 边界条件：响应体超过 8MB 时只读取前 8MB（防上游返回超大页面拖垮进程）；
+// 2xx 但 JSON 非法返回 ErrorTypeInvalidResponse。
+// 需要按状态码分流（而不是一律当错误）的适配器请改用 decodeResponseWithStatus。
 func (p *HTTPProvider) decodeResponse(response *http.Response) (map[string]interface{}, error) {
+	payload, _, err := p.decodeResponseWithStatus(response)
+	return payload, err
+}
+
+// decodeResponseWithStatus 与 decodeResponse 行为完全一致，但额外把 HTTP 状态码返回给调用方，
+// 供需要按状态码分流的上游使用（例如 Context7 的 404 no_documentation_found 属正常空结果）。
+// 参数 response 必须非 nil 且 Body 可读（本函数负责关闭 Body）。
+// 返回值：payload 在非 2xx、响应体读取失败或 JSON 非法时为 nil；status 恒为 response.StatusCode；
+// err 为 body 读取错误、ClassifyHTTPError 的结果或 ErrorTypeInvalidResponse。
+// 之所以把状态码一并返回，是因为 decodeResponse 会把所有 >=400 折叠成 *Error 而丢失原始码，
+// 适配器无法据此区分「正常的无结果」与「真故障」。
+func (p *HTTPProvider) decodeResponseWithStatus(response *http.Response) (map[string]interface{}, int, error) {
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 8*1024*1024))
 	if err != nil {
-		return nil, err
+		return nil, response.StatusCode, err
 	}
 	if response.StatusCode >= 400 {
-		return nil, ClassifyHTTPError(response.StatusCode, string(body))
+		return nil, response.StatusCode, ClassifyHTTPError(response.StatusCode, string(body))
 	}
 	var payload map[string]interface{}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, &Error{Type: ErrorTypeInvalidResponse, StatusCode: response.StatusCode, Message: err.Error()}
+		return nil, response.StatusCode, &Error{Type: ErrorTypeInvalidResponse, StatusCode: response.StatusCode, Message: err.Error()}
 	}
-	return payload, nil
+	return payload, response.StatusCode, nil
 }
 
 func stringValue(item map[string]interface{}, keys ...string) string {
