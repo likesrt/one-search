@@ -100,8 +100,8 @@ export const compatApiChapter: DocChapter = {
           rows: [
             ['`query`', '请求里的 `query` 原样回显'],
             ['`results[].title` / `url`', '合并结果的标题与链接'],
-            ['`results[].content`', '优先 `snippet`，为空时回退 `content`'],
-            ['`results[].raw_content`', '映射 `content` 字段（即上游正文，通常只在 `include_raw_content` 为真时有内容）'],
+            ['`results[].content`', '优先 `snippet`，为空时回退 `content`。因此**默认请求下仍有值**——它取的是摘要，不是正文'],
+            ['`results[].raw_content`', '直接映射 `content`（正文）。**默认请求下为空**：正文由原生接口的 `include_content` 控制，而 Tavily 兼容层的 `include_raw_content` 只透传给上游渠道、不会打开本地正文输出。需要该字段请改用 `/v1/search` 并传 `include_content: true`'],
             ['`results[].score`', '合并结果的分数'],
             ['`response_time`', '`meta.latency_ms` 换算成秒'],
             ['`request_id`', '`meta.request_id`，可用于到请求日志里查详情']

@@ -100,6 +100,9 @@ Authorization: Bearer oak_xxx
 | `dedupe` | boolean | 否 | 是否按 URL 去重。 |
 | `cache` | string | 否 | `default`、`bypass`、`refresh`。 |
 | `include_raw` | boolean | 否 | 是否在结果中包含上游原始条目。 |
+| `include_content` | boolean | 否 | 是否在结果中包含正文 `content`。**默认 `false`**：默认只返回 `title` / `url` / `snippet`。一条正文实测可达数万字符，默认带上会挤占模型上下文；要读某个页面的全文，更推荐对该 URL 调 `fetch` 工具。 |
+| `snippet_limit` | number | 否 | 摘要长度上限（**字节**）。不传或 `0` 时用渠道封顶（默认 1000）；正数只能收紧不能放宽。 |
+| `max_content_length` | number | 否 | 正文长度上限（**字节**），默认 4000、硬顶 50000，仅在 `include_content: true` 时有意义。 |
 
 ### 5.1 关于 `context7`（枚举九项 ≠ 默认路由九项）
 
@@ -110,8 +113,8 @@ Authorization: Bearer oak_xxx
 
 返回结果：
 
-- `content`：MCP 文本内容，包含格式化后的搜索响应 JSON。
-- `structuredContent`：结构化搜索响应，格式与 `/v1/search` 的 `SearchResponse` 一致。
+- `content`：MCP 文本内容，**面向模型排版的 Markdown 清单**（每条结果「序号. 标题 — URL」加一行缩进摘要，条目间空行分隔），不是响应 JSON。这样排版是因为客户端注入模型上下文的就是这一份，而 `structuredContent` 已承载完整结构化数据，文本块再发一遍 JSON 等于把同一份内容发两遍（实测体积减约 26%）。无结果时文本块会附上各渠道的状态与错误类型，便于区分「没搜到」与「渠道都失败了」。
+- `structuredContent`：结构化搜索响应，格式与 `/v1/search` 的 `SearchResponse` 完全一致（含 `score`、`published_at`、`providers` 等文本块里没有的字段）。**需要程序化读取结果时应使用这一份。**
 - `isError`：工具执行是否失败。
 
 ## 6. 工具：`fetch`

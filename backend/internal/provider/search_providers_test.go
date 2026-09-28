@@ -91,7 +91,7 @@ func TestFirecrawlProviderSearch(t *testing.T) {
 	defer server.Close()
 
 	provider := NewFirecrawlProvider(Config{BaseURL: server.URL})
-	response, err := provider.Search(context.Background(), model.SearchRequest{Query: "scraping", Limit: 150, IncludeRaw: true, Freshness: "week"}, model.APIKey{Value: "firecrawl-key"})
+	response, err := provider.Search(context.Background(), model.SearchRequest{Query: "scraping", Limit: 150, IncludeRaw: true, IncludeContent: true, Freshness: "week"}, model.APIKey{Value: "firecrawl-key"})
 	if err != nil {
 		t.Fatalf("Search returned error: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestBraveProviderSearch(t *testing.T) {
 	defer server.Close()
 
 	provider := NewBraveProvider(Config{BaseURL: server.URL})
-	response, err := provider.Search(context.Background(), model.SearchRequest{Query: "privacy", Limit: 50, IncludeRaw: true, Freshness: "week"}, model.APIKey{Value: "brave-key"})
+	response, err := provider.Search(context.Background(), model.SearchRequest{Query: "privacy", Limit: 50, IncludeRaw: true, IncludeContent: true, Freshness: "week"}, model.APIKey{Value: "brave-key"})
 	if err != nil {
 		t.Fatalf("Search returned error: %v", err)
 	}
@@ -273,6 +273,9 @@ func TestKeenableProviderSearch(t *testing.T) {
 		Query:      "gateway",
 		Limit:      200,
 		IncludeRaw: true,
+		// IncludeContent 必须显式打开：正文默认不返回（见 model.SearchRequest 的字段注释），
+		// 而下面要断言 content 与 snippet 同源，不开就只能拿到空 Content。
+		IncludeContent: true,
 		Options: map[string]interface{}{
 			"mode":               "realtime",
 			"site":               "example.com",
@@ -506,7 +509,7 @@ func TestContext7ProviderSearch(t *testing.T) {
 	defer server.Close()
 
 	provider := NewContext7Provider(Config{BaseURL: server.URL})
-	response, err := provider.Search(context.Background(), model.SearchRequest{Query: "chi middleware", IncludeRaw: true}, model.APIKey{Value: "ctx7-key"})
+	response, err := provider.Search(context.Background(), model.SearchRequest{Query: "chi middleware", IncludeRaw: true, IncludeContent: true}, model.APIKey{Value: "ctx7-key"})
 	if err != nil {
 		t.Fatalf("Search returned error: %v", err)
 	}

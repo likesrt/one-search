@@ -595,6 +595,22 @@ func applyDefaults(req model.SearchRequest, settings model.RuntimeSettings) mode
 	if req.CompatFormat == "" {
 		req.CompatFormat = model.CompatFormatNative
 	}
+	// 两个长度上限在这里就夹紧到规范区间，而不是留给各适配器的 resultOptionsFrom：
+	// 缓存键直接读这两个字段，若放任超限值进来，「999999 与 5000」会算出两个不同的键，
+	// 却命中同一份实际结果（适配器都会夹到上限），白白多存一份缓存。
+	// 夹紧规则与 provider.resultOptionsFrom 一致：负数视为未设置，正数不得超过硬顶。
+	if req.SnippetLimit < 0 {
+		req.SnippetLimit = 0
+	}
+	if req.SnippetLimit > provider.DefaultSnippetLimit {
+		req.SnippetLimit = provider.DefaultSnippetLimit
+	}
+	if req.ContentLimit < 0 {
+		req.ContentLimit = 0
+	}
+	if req.ContentLimit > provider.MaxContentLimit {
+		req.ContentLimit = provider.MaxContentLimit
+	}
 	return req
 }
 
@@ -1044,6 +1060,21 @@ func stringListSetting(settings map[string]interface{}, key string) []string {
 	}
 }
 
+// cacheKey 计算一次搜索的缓存键。
+//
+// 键的语义是「凡会改变响应内容的请求字段都必须进键」，否则会出现「同名不同内容」的串味：
+// 先发起的请求写入缓存后，随后参数不同但键相同的请求会拿到不属于自己的结果。
+//
+// include_raw / include_content / snippet_limit / max_content_length 都在键里：
+// 前两者决定结果里有没有 raw 与 content 字段，后两者决定摘要与正文的长度，都直接改变响应内容。
+// include_raw 是后补进键的 —— 此前它不在键里，「先不带再带」会命中缺 raw 的缓存，
+// 该现象曾被文档当作已知限制记录（见 guide/faq.ts 的「带了 include_raw 却拿不到 raw」），
+// 现在改为真隔离：代价是同一查询会多存一份缓存，收益是行为可预测。
+//
+// 参数：req 为已 applyDefaults（长度已夹紧）的请求；providerLimits 为各渠道生效的请求条数
+// （渠道级配置会覆盖请求的 limit，因此它也是响应内容的决定因素）。
+// 返回值：sha256 十六进制摘要，稳定、与请求字段一一对应。
+// 副作用：无。
 func (o *Orchestrator) cacheKey(req model.SearchRequest, providerLimits map[string]int) string {
 	providers := append([]string(nil), req.Providers...)
 	sort.Strings(providers)
@@ -1058,16 +1089,20 @@ func (o *Orchestrator) cacheKey(req model.SearchRequest, providerLimits map[stri
 		dedupe = *req.Dedupe
 	}
 	payload, _ := json.Marshal(map[string]interface{}{
-		"query":           req.Query,
-		"providers":       providers,
-		"provider_limits": limits,
-		"mode":            req.Mode,
-		"limit":           req.Limit,
-		"freshness":       req.Freshness,
-		"dedupe":          dedupe,
-		"rerank":          req.Rerank,
-		"compat":          req.CompatFormat,
-		"options":         req.Options,
+		"query":              req.Query,
+		"providers":          providers,
+		"provider_limits":    limits,
+		"mode":               req.Mode,
+		"limit":              req.Limit,
+		"freshness":          req.Freshness,
+		"dedupe":             dedupe,
+		"rerank":             req.Rerank,
+		"compat":             req.CompatFormat,
+		"options":            req.Options,
+		"include_raw":        req.IncludeRaw,
+		"include_content":    req.IncludeContent,
+		"snippet_limit":      req.SnippetLimit,
+		"max_content_length": req.ContentLimit,
 	})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])

@@ -743,6 +743,8 @@ curl -X POST "$BASE_URL/api/admin/playground/search" \
 
 该接口与 `/v1/search` 使用相同的原生搜索请求格式，但作为管理台调试接口，不要求外部 API Token，也不会绑定 `api_token_id`。
 
+结果里的 `content`（正文）**默认不返回**，与 `/v1/search` 一致：需要时在请求体里加 `"include_content": true`，并用 `"max_content_length"` 控制长度。管理台「搜索调试」页对应的开关是「返回正文」。
+
 ## 6. 搜索接口调用示例
 
 管理员 API Key 可直接调用搜索接口。
@@ -759,9 +761,12 @@ curl -X POST "$BASE_URL/v1/search" \
     "mode": "parallel",
     "limit": 10,
     "cache": "default",
-    "include_raw": false
+    "include_raw": false,
+    "include_content": false
   }'
 ```
+
+`include_content` 默认为 `false`，即结果里只有 `title` / `url` / `snippet`。需要正文时置为 `true`，并可加 `max_content_length`（默认 4000，硬顶 50000）与 `snippet_limit`（摘要上限，只能收紧）。
 
 ### 6.2 Tavily-like
 

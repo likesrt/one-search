@@ -76,6 +76,11 @@
                 :disabled="!ready"
               />
             </label>
+            <!-- 正文默认不返回：一条正文可达数万字符，调试时按需打开即可 -->
+            <label class="chip">
+              <span>返回正文</span>
+              <el-switch v-model="form.includeContent" size="small" :disabled="!ready" />
+            </label>
           </div>
         </div>
       </template>
@@ -110,6 +115,7 @@
               class="snip"
               :class="{ open: isResultOpen(resultKey('merged', index, item)) }"
             >
+              <!-- 展开态优先显示更长的那份：有正文就看正文，否则退回摘要（正文默认不返回） -->
               {{ isResultOpen(resultKey('merged', index, item)) ? (item.content || item.snippet) : (item.snippet || item.content) }}
             </p>
             <div class="foot">
@@ -238,7 +244,10 @@ const form = reactive({
   mode: 'fallback',
   providers: [] as string[],
   limit: 8,
-  cache: 'default'
+  cache: 'default',
+  // 正文默认关闭（与后端 include_content 的默认值一致）：开启后每条结果会带上正文，
+  // 实测单条可达数万字符，调试时通常只需看摘要定位，再对具体 URL 用抓取页取全文。
+  includeContent: false
 })
 
 const availableProviderOptions = computed(() => {
@@ -362,8 +371,17 @@ function providerCallKey(call: ProviderCallLog, index: number) {
   return `${call.provider_name}-${call.provider_key_id || 'no-key'}-${call.attempt_index || 1}-${index}`
 }
 
+/**
+ * 判断结果是否值得显示「展开/收起」按钮。
+ *
+ * 判据只看 content 而不看 snippet：正文默认不返回，此时展开与收起显示的会是同一段摘要，
+ * 按钮点了没有任何变化，留着反而误导。只有真的拿到了正文才提供展开。
+ *
+ * @param item 单条搜索结果
+ * @returns 有正文时为 true
+ */
 function hasResultDetails(item: SearchResultItem) {
-  return Boolean(item.snippet || item.content)
+  return Boolean(item.content)
 }
 
 function resultKey(prefix: string, index: number, item: SearchResultItem) {
@@ -426,7 +444,8 @@ async function run() {
       query: form.query,
       mode: form.mode,
       providers: form.providers,
-      limit: form.limit
+      limit: form.limit,
+      include_content: form.includeContent
     }) as SearchResponse
     await nextTick()
     resultListEl.value?.scrollTo({ top: 0 })

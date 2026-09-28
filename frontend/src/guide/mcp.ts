@@ -171,7 +171,10 @@ export const mcpChapter: DocChapter = {
             ['`freshness`', 'string', '自由文本'],
             ['`dedupe`', 'boolean', '按 URL 去重'],
             ['`cache`', 'string', '枚举 `default` / `bypass` / `refresh`'],
-            ['`include_raw`', 'boolean', '结果里是否带 `raw`']
+            ['`include_raw`', 'boolean', '结果里是否带 `raw`'],
+            ['`include_content`', 'boolean', '结果里是否带正文 `content`。**默认 `false`**：默认只返回 `title` / `url` / `snippet`，正文实测单条可达数万字符，会挤占上下文'],
+            ['`snippet_limit`', 'integer', '摘要长度上限（字节），默认用渠道封顶（1000），只能收紧不能放宽'],
+            ['`max_content_length`', 'integer', '正文长度上限（字节），默认 4000、硬顶 50000，仅在 `include_content: true` 时有意义']
           ]
         },
         {
@@ -184,14 +187,15 @@ export const mcpChapter: DocChapter = {
           type: 'callout',
           tone: 'warn',
           title: 'schema 里没有 options 和 rerank',
-          text: '`search` 工具的 `inputSchema` 只声明了上表八个字段，不含原生接口的 `options`（渠道透传参数）与 `rerank`。即使把 `options` 塞进 `arguments`，虽然会被反序列化进请求结构，但客户端工具校验通常不会允许；需要渠道级透传参数时请直接调用 `/v1/search`。'
+          text: '`search` 工具的 `inputSchema` 只声明了上表各字段（含三个输出开关），不含原生接口的 `options`（渠道透传参数）与 `rerank`。即使把 `options` 塞进 `arguments`，虽然会被反序列化进请求结构，但客户端工具校验通常不会允许；需要渠道级透传参数时请直接调用 `/v1/search`。'
         },
         { type: 'heading', text: '工具结果', level: 4 },
         {
           type: 'list',
           items: [
-            '成功时返回 `content`（一个 `text` 块，内容是缩进后的完整搜索响应 JSON）、`structuredContent`（同一份响应的结构化对象）与 `isError: false`。',
-            '`structuredContent` 的结构与 `/v1/search` 的响应完全一致，因此「全部渠道失败仍返回 200」的性质在这里同样成立：工具会显示为**调用成功**，但 `results` 为空且 `providers[].status` 全为 `error`。',
+            '成功时返回 `content`（一个 `text` 块，内容是**面向模型排版的 Markdown 清单**：每条结果「序号. 标题 — URL」加一行缩进摘要，条目间空行分隔）、`structuredContent`（结构化的完整响应）与 `isError: false`。',
+            '文本块刻意**不是**响应 JSON：`structuredContent` 已经承载了完整结构化数据，文本块再发一遍 JSON 等于把同一份内容发两遍，而客户端注入模型上下文的那一份正是文本块。需要 `score`、`published_at`、`providers` 等字段的调用方应改读 `structuredContent`。',
+            '`structuredContent` 的结构与 `/v1/search` 的响应完全一致，因此「全部渠道失败仍返回 200」的性质在这里同样成立：工具会显示为**调用成功**，但 `results` 为空且 `providers[].status` 全为 `error`。此时文本块会附上各渠道的状态与错误类型，便于模型区分「没搜到」与「渠道都失败了」。',
             '搜索链路本身返回错误时，结果是 `{ content: [text], isError: true }`，**没有** `structuredContent`。',
             '`arguments` 里会额外被注入 `options.source = "mcp"`，因此 MCP 的缓存键与参数相同的原生请求不同，两者不会互相命中。'
           ]

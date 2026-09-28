@@ -72,7 +72,7 @@ func (p *KeenableProvider) Search(ctx context.Context, req model.SearchRequest, 
 	if err != nil {
 		return model.ProviderResponse{}, err
 	}
-	results := normalizeKeenableResults(payload, req.IncludeRaw)
+	results := normalizeKeenableResults(payload, resultOptionsFrom(req, DefaultSnippetLimit))
 	return model.ProviderResponse{Results: results, Usage: usageMeasurements(model.ProviderKeenable, payload), Raw: payload}, nil
 }
 
@@ -172,8 +172,10 @@ func clampIntRange(value, min, max int) int {
 // normalizeKeenableResults 把 Keenable 响应归一化为统一的搜索结果。
 // 只读 results 数组，缺 url 的条目直接丢弃（与其余适配器一致）。
 // 摘要以 snippet 为主、description 兜底：实测 description 可能为空串而 snippet 有值。
-// 上游没有 score 字段，因此用 1/(序号+1) 按名次折算，与 jina / serper 的兜底口径一致。
-func normalizeKeenableResults(payload map[string]interface{}, includeRaw bool) []model.SearchResult {
+// **摘要与正文同源**：上游不给独立的长正文，content 是 snippet 按更宽上限的再截断。
+// 截断口径与是否填充正文/原始条目由 opts 决定；score 固定用 1/(序号+1)（上游没有该字段）。
+// 返回值为新切片；不修改 payload。
+func normalizeKeenableResults(payload map[string]interface{}, opts resultOptions) []model.SearchResult {
 	items := resultArray(payload, "results")
 	results := make([]model.SearchResult, 0, len(items))
 	for index, rawItem := range items {
@@ -192,14 +194,16 @@ func normalizeKeenableResults(payload map[string]interface{}, includeRaw bool) [
 		result := model.SearchResult{
 			Title:       stringValue(item, "title"),
 			URL:         url,
-			Snippet:     snippet,
-			Content:     truncate(snippet, 4000),
+			Snippet:     truncate(snippet, opts.SnippetCap),
 			Provider:    model.ProviderKeenable,
 			Providers:   []string{model.ProviderKeenable},
 			Score:       1 / float64(index+1),
 			PublishedAt: parseTimeValue(stringValue(item, "published_at")),
 		}
-		if includeRaw {
+		if opts.IncludeContent {
+			result.Content = truncate(snippet, opts.ContentCap)
+		}
+		if opts.IncludeRaw {
 			result.Raw = item
 		}
 		results = append(results, result)

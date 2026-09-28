@@ -76,11 +76,11 @@ export const providersChapter: DocChapter = {
         {
           type: 'list',
           items: [
-            '请求体固定为 `{ query, numResults, type: "neural", contents: { text: true, highlights: true } }`。',
+            '请求体为 `{ query, numResults, type: "neural", contents: { highlights: true } }`；`contents.text` 只在 `include_content` 或 `include_raw` 为真时才追加。',
             '`type` **硬编码为 `neural`**：在渠道 settings 里配置 `type` 完全不会生效，也没有其它可传模式。',
             '不读取 `freshness`，也不读取 `options` 的任何键——这两项在请求里写了也会被安静地忽略。',
             '`numResults` 直接用请求的 `limit`（≤0 时为 10），没有上限裁剪，超大会原样发给上游。',
-            '正文来源：`text` 字段；摘要优先取 `highlights[0]`，没有再回退 `text` / `summary`。',
+            '正文来源：`text` 字段（**仅 `include_content: true` 时才向上游索取**，否则连 `contents.text` 都不发，省下出流量与计费）；摘要优先取 `highlights[0]`，没有再回退 `text` / `summary`，按 1000 字节截断。',
             'usage 取自响应里的 `credits` / `total_tokens` / `cost_usd` 一类字段（沿用通用探测规则）。'
           ]
         },
@@ -97,7 +97,7 @@ export const providersChapter: DocChapter = {
             '`GET /v1/search?query=...&count=<limit>`，`count` 无上限裁剪，`limit` ≤ 0 时为 10。',
             '结果数组会依次尝试 `hits`、`organic`，再看 `results.web`、`results.news`、`results`，最后兜底 `web.results` / `web.hits`。',
             '**上游没有给 `score` 时，适配器会人工赋 `1/(序号+1)`**，所以这里看到的分数不是上游相关性分数，只是名次折算。',
-            '正文优先取 `contents.markdown` / `contents.html`，否则取 `content` / `description` / `snippet`，统一截断到 4000 字符。',
+            '正文优先取 `contents.markdown` / `contents.html`，否则取 `content` / `description` / `snippet`，统一截断到 4000 字节；摘要截断 1000 字节。两者都只在 `include_content: true` 时产出。',
             '同样不读取 `freshness` 与 `options`。'
           ]
         },
@@ -108,7 +108,7 @@ export const providersChapter: DocChapter = {
             '搜索词直接拼进 **URL 路径**（`GET /{query}`，并做路径转义），不是查询参数。',
             '**不支持 `limit`**：请求里传多少都一样，返回条数由上游决定；也不读取 `freshness` 与 `options`。',
             '认证头只有 `key.Value` 非空时才发送，因此留空密钥也能尝试匿名调用（上游通常会拒绝或降级）。',
-            '`score` 同样有 `1/(序号+1)` 兜底。摘要截断 1000，正文截断 4000。'
+            '`score` 同样有 `1/(序号+1)` 兜底。摘要截断 1000 字节，正文截断 4000 字节（仅 `include_content: true` 时产出）。'
           ]
         },
         { type: 'heading', text: 'tavily', level: 4 },
@@ -119,7 +119,7 @@ export const providersChapter: DocChapter = {
             '`max_results = min(limit, 20)`，`limit` ≤ 0 时为 10。',
             '支持的 `options` 键：`search_depth`、`topic`、`time_range`（别名 `timeRange`）、`country`、`days`、`include_domains`（别名 `includeDomains`）、`exclude_domains`（别名 `excludeDomains`）。',
             '时间范围取值优先级：`options.time_range` → `freshness` 映射（`day/d/qdr:d/pd` → day，`week/w/qdr:w/pw` → week，`month/m/qdr:m/pm` → month，`year/y/qdr:y/py` → year）→ `options.days` 折算（≤1 天→day，≤7→week，≤31→month，其余→year）。',
-            '正文优先 `raw_content`，回退 `content`。**要让 `content` 字段真的有正文，请传 `include_raw: true`**（会翻译成上游的 `include_raw_content`）。',
+            '正文优先 `raw_content`，回退 `content`。两个开关**各管一头**：`include_content: true` 决定本地响应里有没有 `content` 字段，`include_raw: true` 决定要不要向上游索取全文（翻译成上游的 `include_raw_content`）。两者都开才能拿到最长的那份正文。',
             '`score` 有 `1/(序号+1)` 兜底。'
           ]
         },
@@ -131,7 +131,7 @@ export const providersChapter: DocChapter = {
             '`limit = min(limit, 100)`，`limit` ≤ 0 时为 10。',
             '支持的 `options` 键：`tbs`、`country`、`location`、`include_domains`（别名 `includeDomains`）、`exclude_domains`（别名 `excludeDomains`）、`timeout`（毫秒，>0 才发）。',
             '`tbs` 取值优先级：`options.tbs` → `freshness` 映射（**支持 `hour` / `qdr:h`**，映射为 `qdr:h`；`day` 系列→`qdr:d`，`week`→`qdr:w`，`month`→`qdr:m`，`year`→`qdr:y`）→ 原样透传。',
-            '正文优先取 `markdown`，再回退 `html`、`rawHtml`、`description`、`snippet`。传 `include_raw: true` 会附带 `scrapeOptions.formats = ["markdown"]`，这是拿到正文的关键。',
+            '正文优先取 `markdown`，再回退 `html`、`rawHtml`、`description`、`snippet`，截断 4000 字节。`scrapeOptions.formats = ["markdown"]` 是拿到正文的关键，**只在 `include_raw` 或 `include_content` 为真时才附带**（它会显著增加上游耗时与计费）。',
             '分数 = `1/position`（上游给了 `position` 时）或 `1/(序号+1)`。'
           ]
         },
@@ -143,7 +143,7 @@ export const providersChapter: DocChapter = {
             '支持的 `options` 键：`page`、`tbs`、`gl`（别名 `country`）、`hl`（别名 `locale`、`language`）、`location`。',
             '**`freshness` 直通上游的 `tbs`，不做任何映射**：写 `week` 不会变成 `qdr:w`，需要按 Serper 的写法自己传 `tbs: "qdr:w"`。',
             '结果取 `organic` 与 `news` 两组拼接。',
-            '**`content` 与 `snippet` 同源**（都来自上游的 `snippet` / `description`），因此 Serper 没有独立的长正文。',
+            '**`content` 与 `snippet` 同源**（都来自上游的 `snippet` / `description`），因此 Serper 没有独立的长正文——打开 `include_content` 也只是同一段文本按 4000 字节再截一次。',
             '分数 = `1/position` 或 `1/(序号+1)`。'
           ]
         },
@@ -157,7 +157,7 @@ export const providersChapter: DocChapter = {
             '`freshness` 映射：`day/d/qdr:d/pd` → `pd`，`week/w/qdr:w/pw` → `pw`，`month/m/qdr:m/pm` → `pm`，`year/y/qdr:y/py` → `py`；**其它值（例如 `hour`）原样透传**，上游会拒绝并不认。',
             '`offset` 直接取 `options.offset`；没给时若 `options.page > 1` 则用 `page - 1`。它是**页序号**而不是条数偏移。',
             '**只读取响应里的 `web.results`**：响应没有 `web` 对象时直接返回空结果，不会报错。',
-            '正文 = `description` 拼上 `extra_snippets`；要拿到 extra snippets 需要传 `include_raw: true`（会转成 `extra_snippets=true`）。分数固定为 `1/(序号+1)`。'
+            '正文 = `description` 拼上 `extra_snippets`；`extra_snippets=true` **只在 `include_raw` 或 `include_content` 为真时才附带**（摘要里有这些片段才有意义）。分数固定为 `1/(序号+1)`。'
           ]
         },
         { type: 'heading', text: 'keenable', level: 4 },
@@ -171,7 +171,7 @@ export const providersChapter: DocChapter = {
             '请求体含 `query`、`max_results`（`min(limit, 50)`，`limit` ≤ 0 时为 10）与 `mode`（取 `options.mode`，缺省 `pro`，另一档是 `realtime`；其它值一律回退成 `pro`，不会原样透传给上游）。',
             '支持的 `options` 键：`mode`、`site`、`acquired_after`（别名 `acquiredAfter`）、`acquired_before`（别名 `acquiredBefore`）、`published_after`（别名 `publishedAfter`）、`published_before`（别名 `publishedBefore`）、`query_time`（别名 `queryTime`）、`snippet_max_length`（别名 `snippetMaxLength`）。除 `mode` 与 `snippet_max_length` 外都是原样透传的字符串。',
             '`snippet_max_length` 会夹紧到 180 – 10000；未配置时**不发送该键**，以免用 0 覆盖上游默认值。',
-            '结果取 `results` 数组，缺 `url` 的条目直接丢弃。摘要以 `snippet` 为主、`description` 兜底（实测 `description` 可能为空串而 `snippet` 有值），正文就是该摘要截断到 4000 字符——**这条渠道没有独立的长正文**。',
+            '结果取 `results` 数组，缺 `url` 的条目直接丢弃。摘要以 `snippet` 为主、`description` 兜底（实测 `description` 可能为空串而 `snippet` 有值），**摘要与正文同源**：正文是该摘要按 4000 字节再截一次的产物，这条渠道没有独立的长正文。',
             '上游不返回 `score`，分数固定为 `1/(序号+1)`（与 jina / serper 同一套兜底）；时间只认 `published_at`，`acquired_at` 仅在 `include_raw: true` 的原始条目里可见。',
             '上游响应不含 `usage` 字段，因此这条渠道只会被记 `requests: 1`，不会产生 credits / tokens / usd 计量。'
           ]
@@ -197,7 +197,7 @@ export const providersChapter: DocChapter = {
             '**不读取 `freshness`**：写进请求会被安静忽略（与 exa / you / jina 一致）；需要时间约束时靠 `version` 之类的上游参数。',
             '`library` 可传精确 ID（`/vercel/next.js`）也可传模糊名（`next.js`），**不传时上游会自己选库**——这也是模型在 `search` 工具里只给 `query` 就能用的原因。',
             '**库未命中时上游返回 404 `no_documentation_found`，网关按「空结果」处理而不是报错**：这是「这个问题没有对应库文档」的正常反馈，因此日志里不会记渠道失败，也不会把渠道状态染红。其它 404（例如 base_url 配错）照常报错。',
-            '**结果按文档文件聚合**：一条结果 = 一个文档页，`Content` 里是多段代码示例按语言标注的围栏代码块拼接后的正文，`URL` 是剥掉 `#_snippet_N` 片段后的文件地址。因此 `limit` 在这里的语义是「文档页数」。',
+            '**结果按文档文件聚合**：一条结果 = 一个文档页，`Content` 里是多段代码示例按语言标注的围栏代码块拼接后的正文，`URL` 是剥掉 `#_snippet_N` 片段后的文件地址。因此 `limit` 在这里的语义是「文档页数」。**这条渠道的正文就是代码示例本身**：`include_content` 关闭时只剩一段描述，需要代码示例时必须显式打开它。',
             '分数固定为 `1/(序号+1)`（上游不返回 score，与 jina / serper / keenable 同一套兜底）；`Title` 取代码片段标题、信息类片段取面包屑；缺 URL 的条目直接丢弃。',
             '**没有官方额度接口**（`/v2/libs/metrics` 是库的访问统计而不是账户额度），也不参与自动刷新；**没有公开的按次单价**，内置价目表单价为 0。'
           ]

@@ -65,6 +65,9 @@ Content-Type: application/json`
             ['`rerank`', 'boolean', '否', '参与缓存键与请求日志，但当前实现没有改变结果排序'],
             ['`cache`', 'string', '否', '`default` / `refresh` / `bypass`，默认 `default`'],
             ['`include_raw`', 'boolean', '否', '是否在每条结果里带上游原始条目（`raw` 字段）'],
+            ['`include_content`', 'boolean', '否', '是否返回每条结果的正文（`content` 字段）。**默认 `false`** —— 默认只返回 `title` / `url` / `snippet`；正文实测单条可达数万字符，会大量挤占模型上下文。要读某个页面的全文，更推荐对该 URL 调 `/v1/fetch`（带 `max_length` 与 `start_index` 续读）'],
+            ['`snippet_limit`', 'number', '否', '摘要长度上限（**字节**）。不传或 `0` 时用渠道封顶（默认 1000）；正数只能收紧不能放宽，超过渠道封顶会被夹回'],
+            ['`max_content_length`', 'number', '否', '正文长度上限（**字节**），仅在 `include_content: true` 时有意义。默认 4000，硬顶 50000'],
             ['`options`', 'object', '否', '渠道特定透传参数，见「渠道配置详解」']
           ]
         },
@@ -83,6 +86,12 @@ Content-Type: application/json`
           tone: 'info',
           title: '`context7` 与其它八家的定位不同',
           text: '它是**文档检索渠道**：检索开源库/框架的权威文档与可运行代码示例，按文档文件聚合成结果（一条结果 = 一个文档页）。它**不在默认渠道列表内**，不显式传 `providers: ["context7"]` 就不会被调用，存量调用方的默认行为不变。查库/SDK/框架用法时建议先单独用它，结果为空（该库未被收录）再用其它渠道补充。'
+        },
+        {
+          type: 'callout',
+          tone: 'warn',
+          title: '正文（`content`）默认不返回',
+          text: '这是**破坏性变更**：`results[].content` 默认为空，`include_content: true` 才会返回。原因是一条正文实测可达数万字符（exa 单条 28,184 字符），一把塞进响应会挤爆调用方的模型上下文；且体量随机波动，同一个查询换一批结果就可能差一个数量级。**取正文的推荐姿势**：先用默认请求拿到 `title` + `url` + `snippet` 判断哪几条值得读，再对目标 URL 调 `/v1/fetch` 取全文——它输出紧凑 Markdown、支持 `start_index` 续读，质量比搜索附带的正文稳定。注意 `context7` 的 `content` 就是代码示例本身，关掉后只剩描述，需要代码时应对该渠道显式打开开关。'
         }
       ]
     },
@@ -93,14 +102,13 @@ Content-Type: application/json`
         {
           type: 'code',
           lang: 'json',
-          title: '顶层三段',
+          title: '顶层三段（默认请求，不含正文）',
           content: `{
   "results": [
     {
       "title": "...",
       "url": "https://...",
       "snippet": "...",
-      "content": "...",
       "provider": "exa",
       "providers": ["exa", "tavily"],
       "score": 0.87,
@@ -139,6 +147,8 @@ Content-Type: application/json`
           rows: [
             ['`results[].provider`', '首来源渠道'],
             ['`results[].providers`', '命中的全部渠道。去重时同一 URL 的多来源会被合并到这个数组里'],
+            ['`results[].snippet`', '摘要，长度上限由渠道封顶或请求的 `snippet_limit` 决定（取更小者），**按字节截断**'],
+            ['`results[].content`', '正文，**默认不出现**；仅在 `include_content: true` 时返回，长度受 `max_content_length` 限制。`serper` 与 `keenable` 没有独立长正文，该字段与其 `snippet` 同源'],
             ['`results[].score`', '渠道各自给出的分数，部分渠道在上游未返回分数时用 `1/(序号+1)` 兜底，**不是跨渠道可比的归一化分数**'],
             ['`providers[].status`', '`success` 或 `error`'],
             ['`providers[].error_type`', '`auth` / `quota_exhausted` / `rate_limited` / `timeout` / `upstream` / `invalid_response` / `no_key`'],
@@ -208,13 +218,17 @@ freshness
 dedupe
 rerank
 compat（native / tavily / serper / openai）
-options`
+options
+include_raw
+include_content
+snippet_limit
+max_content_length`
         },
         {
           type: 'callout',
-          tone: 'danger',
-          title: '缓存键不含调用方身份，也不含 include_raw',
-          text: '键里没有令牌 ID / 租户维度，也没有 `include_raw`。因此：① 不同令牌、不同调用方只要参数相同就会共享同一份缓存；② 先发起不带 `include_raw` 的请求并写入缓存后，随后带 `include_raw: true` 的相同请求会直接从缓存返回，**结果里不会有 `raw` 字段**。需要保证 `raw` 一定存在时，请用 `cache: "bypass"` 或改变其它会影响键的参数。'
+          tone: 'warn',
+          title: '缓存键不含调用方身份，但含全部输出开关',
+          text: '键里**没有**令牌 ID / 租户维度：不同令牌、不同调用方只要参数相同就会共享同一份缓存（缓存以整次响应为单位）。但**输出开关都在键里** —— `include_raw`、`include_content`、`snippet_limit`、`max_content_length` 任一不同就会算出不同的键，因此「先不带 `include_content` 写缓存、随后带 `include_content: true` 却命中旧缓存、拿不到正文」这类串味**不会发生**。代价是同一查询按不同输出口径各存一份缓存。'
         }
       ]
     },

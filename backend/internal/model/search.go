@@ -49,19 +49,35 @@ const (
 )
 
 type SearchRequest struct {
-	Query             string                 `json:"query"`
-	Providers         []string               `json:"providers,omitempty"`
-	ProvidersExplicit bool                   `json:"-"`
-	Mode              SearchMode             `json:"mode,omitempty"`
-	Limit             int                    `json:"limit,omitempty"`
-	LimitExplicit     bool                   `json:"-"`
-	Freshness         string                 `json:"freshness,omitempty"`
-	Dedupe            *bool                  `json:"dedupe,omitempty"`
-	Rerank            bool                   `json:"rerank,omitempty"`
-	Cache             CachePolicy            `json:"cache,omitempty"`
-	IncludeRaw        bool                   `json:"include_raw,omitempty"`
-	CompatFormat      CompatFormat           `json:"-"`
-	Options           map[string]interface{} `json:"options,omitempty"`
+	Query             string      `json:"query"`
+	Providers         []string    `json:"providers,omitempty"`
+	ProvidersExplicit bool        `json:"-"`
+	Mode              SearchMode  `json:"mode,omitempty"`
+	Limit             int         `json:"limit,omitempty"`
+	LimitExplicit     bool        `json:"-"`
+	Freshness         string      `json:"freshness,omitempty"`
+	Dedupe            *bool       `json:"dedupe,omitempty"`
+	Rerank            bool        `json:"rerank,omitempty"`
+	Cache             CachePolicy `json:"cache,omitempty"`
+	IncludeRaw        bool        `json:"include_raw,omitempty"`
+	// IncludeContent 决定是否在每条结果里返回正文 content。
+	//
+	// 默认 false 是有意的破坏性变更：正文往往远大于摘要（实测单条可达数万字符），
+	// 一把塞进响应会把调用方的模型上下文挤爆。需要正文时显式置 true，
+	// 或改为按需调用 fetch 工具读取感兴趣的 URL。
+	IncludeContent bool `json:"include_content,omitempty"`
+	// SnippetLimit 是摘要的长度上限（**字节**，沿用 provider.truncate 的既有口径）。
+	//
+	// 0 表示沿用渠道默认封顶（provider.DefaultSnippetLimit）；正数只能**收紧**不能放宽，
+	// 超过渠道封顶时会被夹紧到渠道封顶。该值参与缓存键，因此不同长度上限不共享缓存。
+	SnippetLimit int `json:"snippet_limit,omitempty"`
+	// ContentLimit 是正文的长度上限（**字节**），对应请求字段名 max_content_length。
+	//
+	// 0 表示用默认值（provider.DefaultContentLimit）；正数上限被夹紧到
+	// provider.MaxContentLimit，避免单条正文撑爆调用方上下文。IncludeContent 为 false 时本字段无操作。
+	ContentLimit int                    `json:"max_content_length,omitempty"`
+	CompatFormat CompatFormat           `json:"-"`
+	Options      map[string]interface{} `json:"options,omitempty"`
 }
 
 type SearchResponse struct {

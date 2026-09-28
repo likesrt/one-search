@@ -361,11 +361,83 @@ func float64Pointer(value float64) *float64 {
 	return &value
 }
 
+// truncate 把字符串截断到 max 字节，**按 UTF-8 字符边界回退**，保证结果始终是合法 UTF-8。
+//
+// 曾经直接用 value[:max] 截断：这在 max 落在多字节字符中间时会把该字符切成半个，
+// 产出非法 UTF-8。上游 JSON 解码时不合法的部分会被替换为 U+FFFD（"�"），
+// 于是响应末尾出现一串乱码，用户也会看到 JSON 里残留 � 转义。
+// 中文摘要正好是高发场景：每个汉字 3 字节，max=1000 时 999/1000 落在字符中间。
+//
+// 参数 value 为待截断文本，max 为字节上限。返回值：max <= 0 或长度不超限时原样返回；
+// 否则在不超过 max 的前提下回退到最近一个字符边界。**返回值可能短于 max**（最多短 3 字节）。
+// 本函数为纯函数，无副作用。
 func truncate(value string, max int) string {
 	if max <= 0 || len(value) <= max {
 		return value
 	}
-	return value[:max]
+	// 从 max 向前找第一个「非 UTF-8 续字节」的位置：续字节的高两位固定为 10，
+	// 因此该位置必然是某个字符的起始字节，切在这里即保证不劈开任何字符。
+	cut := max
+	for cut > 0 && value[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return value[:cut]
+}
+
+const (
+	// DefaultSnippetLimit 是摘要的默认截断上限（字节）。
+	DefaultSnippetLimit = 1000
+	// DefaultContentLimit 是正文的默认截断上限（字节）。
+	DefaultContentLimit = 4000
+	// MaxContentLimit 是正文截断上限的硬顶（字节），与 fetch 的 maximumMaxLength 同量级：
+	// 正文默认不返回，显式开启时也必须有个上限，否则单条正文就能吃掉整个上下文预算。
+	MaxContentLimit = 50000
+)
+
+// resultOptions 是归一化结果时所需的输出开关与截断上限。
+//
+// 之所以做成值对象而不是继续往 normalize*Results 上加布尔参数：九个适配器共用同一套口径，
+// 每加一个开关都要改九处签名，且调用点很难看出「这次到底开没开正文」。
+type resultOptions struct {
+	IncludeRaw     bool // 是否填充 result.Raw（上游原始条目）
+	IncludeContent bool // 是否填充 result.Content（正文）
+	SnippetCap     int  // 摘要截断上限（字节），已按渠道默认与请求值夹紧
+	ContentCap     int  // 正文截断上限（字节）
+}
+
+// resultOptionsFrom 由请求参数与渠道默认封顶算出本次归一化的输出口径。
+//
+// 参数：req 为已应用默认值的搜索请求（负数长度视为未设置）；snippetCap 为该渠道自己的
+// 摘要封顶（<=0 时回退 DefaultSnippetLimit）。
+//
+// 返回值：三个开关照抄请求，SnippetCap / ContentCap 为最终生效的字节上限。
+//
+// 边界条件：SnippetCap 取 min(渠道封顶, 请求值)，因此请求值只能收紧不能放宽 ——
+// 允许放大就等于允许调用方绕过渠道侧的上下文保护；ContentLimit 超过 MaxContentLimit 时同样夹紧。
+// IncludeContent 为 false 时 ContentCap 仍照常算出（内容压根不会被填充），避免调用点再判一次。
+//
+// 副作用：无。
+func resultOptionsFrom(req model.SearchRequest, snippetCap int) resultOptions {
+	if snippetCap <= 0 {
+		snippetCap = DefaultSnippetLimit
+	}
+	effectiveSnippet := snippetCap
+	if req.SnippetLimit > 0 && req.SnippetLimit < snippetCap {
+		effectiveSnippet = req.SnippetLimit
+	}
+	effectiveContent := req.ContentLimit
+	if effectiveContent <= 0 {
+		effectiveContent = DefaultContentLimit
+	}
+	if effectiveContent > MaxContentLimit {
+		effectiveContent = MaxContentLimit
+	}
+	return resultOptions{
+		IncludeRaw:     req.IncludeRaw,
+		IncludeContent: req.IncludeContent,
+		SnippetCap:     effectiveSnippet,
+		ContentCap:     effectiveContent,
+	}
 }
 
 func requestLimit(limit, fallback, max int) int {

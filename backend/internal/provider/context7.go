@@ -12,10 +12,12 @@ import (
 )
 
 const (
-	// context7SnippetLimit / context7ContentLimit 与 jina 等适配器同档：
+	// context7SnippetLimit 是 Context7 渠道自己的摘要封顶，与 jina 等适配器同档：
 	// 上游的文档片段可能很长，整段塞进响应会迅速吃掉模型的上下文预算。
+	//
+	// 它作为渠道默认值传给 resultOptionsFrom，因此调用方可以用更小的 snippet_limit 收紧，
+	// 但无法用它放大。正文侧没有对应的渠道常量：正文上限统一走请求的 max_content_length。
 	context7SnippetLimit = 1000
-	context7ContentLimit = 4000
 	// context7NoDocumentationError 是上游「没有匹配到任何库文档」时响应体 error 字段的取值。
 	context7NoDocumentationError = "no_documentation_found"
 )
@@ -82,7 +84,7 @@ func (p *Context7Provider) Search(ctx context.Context, req model.SearchRequest, 
 		}
 		return model.ProviderResponse{}, err
 	}
-	results := normalizeContext7Results(payload, req.IncludeRaw, req.Limit)
+	results := normalizeContext7Results(payload, resultOptionsFrom(req, context7SnippetLimit), req.Limit)
 	return model.ProviderResponse{Results: results, Usage: usageMeasurements(model.ProviderContext7, payload), Raw: payload}, nil
 }
 
@@ -163,10 +165,11 @@ func newContext7Collector() *context7Collector {
 
 // add 把一条已归一化的片段并入其所属文档文件。
 // 参数：url 为已剥 fragment 的文件地址，为空时直接丢弃该条目（与其余适配器一致）；
-// title/snippet/content 为归一化后的字段；raw 为原始条目，includeRaw 为 true 时写入 Raw。
+// title/snippet/content 为归一化后的字段（content 为空串表示本次不输出正文）；raw 为原始条目。
+// opts 只用于决定是否写入 Raw —— 正文是否填充由调用方在传参前决定（不填充时 content 传空串）。
 // 合并规则：正文按出现顺序拼接，标题与摘要只在原值为空时补齐（保留首个非空值）。
 // 副作用：修改 c 内部的累积状态。
-func (c *context7Collector) add(url, title, snippet, content string, raw map[string]interface{}, includeRaw bool) {
+func (c *context7Collector) add(url, title, snippet, content string, raw map[string]interface{}, opts resultOptions) {
 	if url == "" {
 		return
 	}
@@ -180,7 +183,7 @@ func (c *context7Collector) add(url, title, snippet, content string, raw map[str
 			Provider:  model.ProviderContext7,
 			Providers: []string{model.ProviderContext7},
 		}
-		if includeRaw {
+		if opts.IncludeRaw {
 			result.Raw = raw
 		}
 		c.byURL[url] = &result
@@ -198,14 +201,20 @@ func (c *context7Collector) add(url, title, snippet, content string, raw map[str
 	}
 }
 
-// results 按首次出现顺序输出聚合结果，并把正文统一截断到 context7ContentLimit
-// （单条片段已在上游侧截断，但同一文件的多个片段拼接后仍可能超限，因此在这里收口）。
+// results 按首次出现顺序输出聚合结果，并把正文统一收口到 contentCap
+// （单条片段在聚合时可超过上限，同一文件的多个片段拼接后更会超限，因此在这里统一裁）。
+//
+// 参数 contentCap 由调用方按本次请求口径传入（见 resultOptionsFrom）；未输出正文时为 0，
+// 此时不写 Content 字段 —— 这与「正文为空串」不同：后者会让 content 以空值出现在 JSON 里。
+//
 // 返回值为新切片，修改它不会影响聚合器内部状态。
-func (c *context7Collector) results() []model.SearchResult {
+func (c *context7Collector) results(contentCap int) []model.SearchResult {
 	results := make([]model.SearchResult, 0, len(c.order))
 	for _, url := range c.order {
 		result := *c.byURL[url]
-		result.Content = truncate(result.Content, context7ContentLimit)
+		if contentCap > 0 {
+			result.Content = truncate(result.Content, contentCap)
+		}
 		results = append(results, result)
 	}
 	return results
@@ -215,15 +224,23 @@ func (c *context7Collector) results() []model.SearchResult {
 const context7ContentSeparator = "\n\n"
 
 // normalizeContext7Results 把 Context7 的 type=json 响应归一化为统一的搜索结果。
-// 参数：payload 为响应体；includeRaw 决定是否保留原始条目；limit 为请求条数（<=0 表示不截断）。
+// 参数：payload 为响应体；opts 决定截断口径、是否输出正文与是否保留原始条目；
+// limit 为请求条数（<=0 表示不截断）。
 // 处理顺序为 codeSnippets 在前、infoSnippets 在后，与上游响应字段顺序一致。
 // Score 用 1/(序号+1) 按名次折算（上游不返回 score，与 jina / serper / keenable 同一套兜底口径）。
 // 上游不接受 limit 参数，因此截断只发生在本函数内，语义是「文档页数」。
-func normalizeContext7Results(payload map[string]interface{}, includeRaw bool, limit int) []model.SearchResult {
+// 边界条件：IncludeContent 为 false 时不产出 Content —— 该渠道的正文就是代码示例本身，
+// 关掉后只剩 codeDescription 摘要，需要代码时应显式打开 include_content。
+func normalizeContext7Results(payload map[string]interface{}, opts resultOptions, limit int) []model.SearchResult {
 	collector := newContext7Collector()
-	context7AddCodeSnippets(collector, payload, includeRaw)
-	context7AddInfoSnippets(collector, payload, includeRaw)
-	aggregated := collector.results()
+	context7AddCodeSnippets(collector, payload, opts)
+	context7AddInfoSnippets(collector, payload, opts)
+	// 未输出正文时传 0：聚合器的 results 据此跳过 Content 赋值（而不是写入空串）。
+	contentCap := 0
+	if opts.IncludeContent {
+		contentCap = opts.ContentCap
+	}
+	aggregated := collector.results(contentCap)
 	for index := range aggregated {
 		aggregated[index].Score = 1 / float64(index+1)
 	}
@@ -235,8 +252,9 @@ func normalizeContext7Results(payload map[string]interface{}, includeRaw bool, l
 
 // context7AddCodeSnippets 把 codeSnippets 数组并入聚合器。
 // 字段映射：URL = 剥掉 fragment 的 codeId（缺 URL 丢弃）、Title = codeTitle（空则回退 pageTitle）、
-// Snippet = codeDescription、Content = codeList 各段代码按围栏拼接。
-func context7AddCodeSnippets(collector *context7Collector, payload map[string]interface{}, includeRaw bool) {
+// Snippet = codeDescription（按 opts.SnippetCap 截断）、
+// Content = codeList 各段代码按围栏拼接（仅 opts.IncludeContent 时产出，按 opts.ContentCap 收口）。
+func context7AddCodeSnippets(collector *context7Collector, payload map[string]interface{}, opts resultOptions) {
 	for _, rawItem := range resultArray(payload, "codeSnippets") {
 		item := mapFromInterface(rawItem)
 		if item == nil {
@@ -246,21 +264,28 @@ func context7AddCodeSnippets(collector *context7Collector, payload map[string]in
 		if title == "" {
 			title = stringValue(item, "pageTitle")
 		}
+		snippet := truncate(stringValue(item, "codeDescription"), opts.SnippetCap)
+		content := ""
+		if opts.IncludeContent {
+			content = truncate(context7CodeBlocks(item), opts.ContentCap)
+		}
 		collector.add(
 			stripURLFragment(stringValue(item, "codeId")),
 			title,
-			truncate(stringValue(item, "codeDescription"), context7SnippetLimit),
-			context7CodeBlocks(item),
+			snippet,
+			content,
 			item,
-			includeRaw,
+			opts,
 		)
 	}
 }
 
 // context7AddInfoSnippets 把 infoSnippets 数组并入聚合器。
 // 字段映射：URL = 剥掉 fragment 的 pageId（缺 URL 丢弃）、Title = breadcrumb（空则回退 pageTitle）、
-// Snippet 与 Content 都取 content（分别截断到 1000 / 4000）。
-func context7AddInfoSnippets(collector *context7Collector, payload map[string]interface{}, includeRaw bool) {
+// Snippet 取 content 按 opts.SnippetCap 截断；Content 同源但按 opts.ContentCap 截断，
+// 仅在 opts.IncludeContent 时产出。之所以两处都用同一份 content 变量取值，
+// 是因为该渠道的上游只给一个正文字段，摘要与正文的差异仅在于截断上限。
+func context7AddInfoSnippets(collector *context7Collector, payload map[string]interface{}, opts resultOptions) {
 	for _, rawItem := range resultArray(payload, "infoSnippets") {
 		item := mapFromInterface(rawItem)
 		if item == nil {
@@ -271,13 +296,18 @@ func context7AddInfoSnippets(collector *context7Collector, payload map[string]in
 			title = stringValue(item, "pageTitle")
 		}
 		content := stringValue(item, "content")
+		snippet := truncate(content, opts.SnippetCap)
+		outContent := ""
+		if opts.IncludeContent {
+			outContent = truncate(content, opts.ContentCap)
+		}
 		collector.add(
 			stripURLFragment(stringValue(item, "pageId")),
 			title,
-			truncate(content, context7SnippetLimit),
-			truncate(content, context7ContentLimit),
+			snippet,
+			outContent,
 			item,
-			includeRaw,
+			opts,
 		)
 	}
 }

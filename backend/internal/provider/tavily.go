@@ -21,6 +21,19 @@ func NewTavilyProvider(cfg Config) *TavilyProvider {
 	return &TavilyProvider{HTTPProvider: NewHTTPProvider(cfg)}
 }
 
+// Search 调用 Tavily 的 POST /search，并把结果归一化为统一的搜索结果。
+//
+// 参数：req.Query 为检索原文；req.Limit 经 requestLimit 夹到 1..20（<=0 时为 10）；
+// options 支持 search_depth / topic / time_range（别名 timeRange）/ country /
+// include_domains（别名 includeDomains）/ exclude_domains（别名 excludeDomains）；
+// req.IncludeRaw 会翻译成上游的 include_raw_content（只影响上游是否回传全文，不决定本地是否输出正文）。
+//
+// 返回值：归一化结果、usage 计量与上游原始响应；上游非 2xx 或响应体非法时返回 *Error。
+//
+// 边界条件：响应体的 include_usage 恒为 true，用于让上游回传用量；正文是否填充与截断口径
+// 由 resultOptionsFrom 统一决定，与 IncludeRaw 无关。
+//
+// 副作用：发起一次真实 HTTP 请求；Response.Body 由 decodeResponse 关闭。
 func (p *TavilyProvider) Search(ctx context.Context, req model.SearchRequest, key model.APIKey) (model.ProviderResponse, error) {
 	body := map[string]interface{}{
 		"query":         req.Query,
@@ -61,7 +74,7 @@ func (p *TavilyProvider) Search(ctx context.Context, req model.SearchRequest, ke
 	if err != nil {
 		return model.ProviderResponse{}, err
 	}
-	results := normalizeTavilyResults(payload, req.IncludeRaw)
+	results := normalizeTavilyResults(payload, resultOptionsFrom(req, DefaultSnippetLimit))
 	return model.ProviderResponse{Results: results, Usage: usageMeasurements(model.ProviderTavily, payload), Raw: payload}, nil
 }
 
@@ -189,7 +202,12 @@ func tavilyTimeRange(req model.SearchRequest) string {
 	}
 }
 
-func normalizeTavilyResults(payload map[string]interface{}, includeRaw bool) []model.SearchResult {
+// normalizeTavilyResults 把 Tavily 响应归一化为统一的搜索结果。
+// 字段映射：URL 缺失的条目丢弃；摘要取 content / snippet / description，全空时回退 raw_content；
+// 正文优先 raw_content，回退 content（上游只在请求了 include_raw_content 时才给 raw_content）。
+// 截断口径与是否填充正文/原始条目由 opts 决定；score 缺失时用 1/(序号+1) 兜底。
+// 返回值为新切片；不修改 payload。
+func normalizeTavilyResults(payload map[string]interface{}, opts resultOptions) []model.SearchResult {
 	items := resultArray(payload, "results")
 	results := make([]model.SearchResult, 0, len(items))
 	for index, rawItem := range items {
@@ -213,14 +231,16 @@ func normalizeTavilyResults(payload map[string]interface{}, includeRaw bool) []m
 		result := model.SearchResult{
 			Title:       stringValue(item, "title"),
 			URL:         url,
-			Snippet:     truncate(snippet, 1000),
-			Content:     truncate(content, 4000),
+			Snippet:     truncate(snippet, opts.SnippetCap),
 			Provider:    model.ProviderTavily,
 			Providers:   []string{model.ProviderTavily},
 			Score:       score,
 			PublishedAt: parseTimeValue(stringValue(item, "published_date", "publishedDate", "date")),
 		}
-		if includeRaw {
+		if opts.IncludeContent {
+			result.Content = truncate(content, opts.ContentCap)
+		}
+		if opts.IncludeRaw {
 			result.Raw = item
 		}
 		results = append(results, result)

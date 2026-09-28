@@ -113,8 +113,19 @@ export const faqChapter: DocChapter = {
           type: 'list',
           items: [
             '**症状**：`include_raw: true` 的请求，结果里没有 `raw` 字段。',
-            '**原因**：缓存键**不包含** `include_raw`。如果此前有参数完全相同的请求（不带 `include_raw`）写入过缓存，本次就会直接命中那份缓存。',
-            '**处理**：用 `cache: "bypass"`，或改变任一参与缓存键的参数（例如 `limit`），让请求绕开旧缓存。'
+            '**原因**：该字段只在渠道真的回传了原始条目时才填充，不是开关一开就一定出现。',
+            '**处理**：先确认渠道本身会给原始条目（`tavily` / `firecrawl` / `brave` 会因该开关改变上游请求，其余渠道只是把已有响应原样带出）；再用 `cache: "bypass"` 排除读到旧缓存的可能。',
+            '**注**：`include_raw` 已参与缓存键计算，因此不会再出现「参数不同却命中同一份缓存」的串味。'
+          ]
+        },
+        { type: 'heading', text: '结果里没有 content（正文）', level: 4 },
+        {
+          type: 'list',
+          items: [
+            '**症状**：`results[]` 里只有 `title` / `url` / `snippet`，没有 `content`。',
+            '**原因**：正文**默认不返回**（`include_content` 默认 `false`）。一条正文实测可达数万字符，默认带上会挤爆模型上下文。',
+            '**处理**：需要正文时显式传 `include_content: true`，并用 `max_content_length` 控制长度。更推荐的做法是**按需抓取**：先看 `snippet` 判断哪几条值得读，再对目标 `url` 调 `/v1/fetch` 取全文（支持 `start_index` 续读，正文质量也比搜索附带的那份稳定）。',
+            '**注意**：`serper` 与 `keenable` 的正文与摘要同源，打开开关也只是同一段文本按更宽的上限再截一次；`context7` 的正文是代码示例本身，需要代码示例时必须打开这个开关。'
           ]
         },
         { type: 'heading', text: '别人的请求命中了我看到的缓存', level: 4 },
@@ -216,9 +227,9 @@ export const faqChapter: DocChapter = {
         {
           type: 'list',
           items: [
-            '**症状**：「搜索调试」页只能调模式、平台、条数。',
-            '**原因**：该页设计为最小参数集，只发送 `query`、`mode`、`providers`、`limit`。',
-            '**处理**：需要验证 `freshness`、`dedupe`、`rerank`、`include_raw`、`options` 时直接调用 `/v1/search`；调用结果仍会出现在「请求日志」里，可以对照详情。'
+            '**症状**：「搜索调试」页只能调模式、平台、条数、是否返回正文。',
+            '**原因**：该页设计为最小参数集，只发送 `query`、`mode`、`providers`、`limit`、`include_content`。',
+            '**处理**：需要验证 `freshness`、`dedupe`、`rerank`、`include_raw`、`snippet_limit`、`max_content_length`、`options` 时直接调用 `/v1/search`；调用结果仍会出现在「请求日志」里，可以对照详情。'
           ]
         },
         { type: 'heading', text: '上游密钥状态变成 cooling / exhausted，怎么恢复', level: 4 },

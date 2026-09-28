@@ -21,7 +21,22 @@ func NewBraveProvider(cfg Config) *BraveProvider {
 	return &BraveProvider{HTTPProvider: NewHTTPProvider(cfg)}
 }
 
+// Search 调用 Brave 的 GET /web/search，并把结果归一化为统一的搜索结果。
+//
+// 参数：req.Query 与 req.Limit 作为 q / count 透传（经 requestLimit 夹到 1..20，<=0 时为 10）；
+// options 支持 freshness / country / search_lang（别名 searchLang、hl、language）/
+// ui_lang（别名 uiLang、locale）/ safesearch（别名 safe_search、safeSearch）/ offset / page；
+// req.Freshness 经 braveFreshness 映射为上游取值（day→pd、week→pw、month→pm、year→py）。
+// key.Value 作为 X-Subscription-Token 发送。
+//
+// 返回值：归一化结果、usage 计量与上游原始响应；上游非 2xx 或响应体非法时返回 *Error。
+//
+// 边界条件：extra_snippets=true 是拿多条摘要片段的前提，只在调用方要正文（include_content）
+// 或原始条目（include_raw）时才附带 —— 它会让上游返回更多文本、增加本次调用的出流量。
+//
+// 副作用：发起一次真实 HTTP 请求；Response.Body 由 decodeResponse 关闭。
 func (p *BraveProvider) Search(ctx context.Context, req model.SearchRequest, key model.APIKey) (model.ProviderResponse, error) {
+	opts := resultOptionsFrom(req, DefaultSnippetLimit)
 	limit := requestLimit(req.Limit, 10, 20)
 	params := url.Values{}
 	params.Set("q", req.Query)
@@ -44,7 +59,9 @@ func (p *BraveProvider) Search(ctx context.Context, req model.SearchRequest, key
 	if offset := braveOffset(req, limit); offset > 0 {
 		params.Set("offset", strconv.Itoa(offset))
 	}
-	if req.IncludeRaw {
+	// extra_snippets 只对 content 有意义（content = description 拼上这些片段），
+	// 因此要正文或要原始条目时才向上游索取，默认路径不发，避免白拿一堆会被丢弃的文本。
+	if opts.IncludeRaw || opts.IncludeContent {
 		params.Set("extra_snippets", "true")
 	}
 	request, err := p.newGETRequest(ctx, "/web/search", params)
@@ -60,7 +77,7 @@ func (p *BraveProvider) Search(ctx context.Context, req model.SearchRequest, key
 	if err != nil {
 		return model.ProviderResponse{}, err
 	}
-	results := normalizeBraveResults(payload, req.IncludeRaw)
+	results := normalizeBraveResults(payload, opts)
 	return model.ProviderResponse{Results: results, Usage: usageMeasurements(model.ProviderBrave, payload), Raw: payload}, nil
 }
 
@@ -95,7 +112,15 @@ func braveOffset(req model.SearchRequest, limit int) int {
 	return 0
 }
 
-func normalizeBraveResults(payload map[string]interface{}, includeRaw bool) []model.SearchResult {
+// normalizeBraveResults 把 Brave 响应归一化为统一的搜索结果。
+//
+// 只读 web.results；web 缺失时返回 nil（不是空切片）—— 上游用「没有 web 段」表示无结果，
+// 与「有 web 段但 results 为空」语义不同，调用方据此区分可避免把上游异常当空结果。
+// 字段映射：URL 取 url（缺失丢弃）；摘要取 description / snippet；
+// 正文 = 摘要拼上 extra_snippets（上游只有请求了 extra_snippets 才给该字段）。
+// 截断口径与是否填充正文/原始条目由 opts 决定；score 固定用 1/(序号+1)（上游不返回相关性分数）。
+// 返回值为新切片；不修改 payload。
+func normalizeBraveResults(payload map[string]interface{}, opts resultOptions) []model.SearchResult {
 	web := mapFromInterface(payload["web"])
 	if web == nil {
 		return nil
@@ -112,25 +137,36 @@ func normalizeBraveResults(payload map[string]interface{}, includeRaw bool) []mo
 			continue
 		}
 		snippet := stringValue(item, "description", "snippet")
-		extraSnippets := stringArrayValue(item, "extra_snippets")
-		content := snippet
-		if len(extraSnippets) > 0 {
-			content = strings.Join(append([]string{snippet}, extraSnippets...), "\n")
-		}
 		result := model.SearchResult{
 			Title:       stringValue(item, "title"),
 			URL:         url,
-			Snippet:     truncate(snippet, 1000),
-			Content:     truncate(content, 4000),
+			Snippet:     truncate(snippet, opts.SnippetCap),
 			Provider:    model.ProviderBrave,
 			Providers:   []string{model.ProviderBrave},
 			Score:       1 / float64(index+1),
 			PublishedAt: parseTimeValue(stringValue(item, "age", "page_age", "published", "published_at", "date")),
 		}
-		if includeRaw {
+		if opts.IncludeContent {
+			result.Content = truncate(braveContent(item, snippet), opts.ContentCap)
+		}
+		if opts.IncludeRaw {
 			result.Raw = item
 		}
 		results = append(results, result)
 	}
 	return results
+}
+
+// braveContent 拼出 Brave 的正文：摘要在前，extra_snippets 按上游顺序续在后面。
+//
+// 单独拆出是因为 extra_snippets 的拼接（含空片段过滤）与截断是两个关注点，
+// 混在循环里会让 normalizeBraveResults 超出可读长度。
+// 参数：item 为单条上游结果，snippet 为已取好的摘要（调用方已算过，避免重复取值）。
+// 返回值：无 extra_snippets 时就是 snippet 本身；有则用换行分隔拼接；全为空时返回空串。
+func braveContent(item map[string]interface{}, snippet string) string {
+	extraSnippets := stringArrayValue(item, "extra_snippets")
+	if len(extraSnippets) == 0 {
+		return snippet
+	}
+	return strings.Join(append([]string{snippet}, extraSnippets...), "\n")
 }

@@ -306,6 +306,53 @@ func TestCacheKeyStableAcrossProviderOrder(t *testing.T) {
 	}
 }
 
+// TestCacheKeyIncludesOutputSwitches 断言输出开关都会改变缓存键。
+//
+// 背景：include_raw 此前不在键里，导致「先不带 raw 写缓存、随后带 include_raw 却命中旧缓存、
+// 拿不到 raw 字段」的串味（该现象曾作为已知限制写进用户文档）。include_content 等新字段
+// 与它同类，因此这里逐个断言「改一个就必须换一个键」，防止以后新增输出开关时又漏进键。
+func TestCacheKeyIncludesOutputSwitches(t *testing.T) {
+	o := &Orchestrator{}
+	base := model.SearchRequest{Query: "q", Providers: []string{"a"}, Mode: model.SearchModeParallel, Limit: 10}
+	baseKey := o.cacheKey(base, nil)
+
+	variants := map[string]model.SearchRequest{
+		"include_raw":        {Query: "q", Providers: []string{"a"}, Mode: model.SearchModeParallel, Limit: 10, IncludeRaw: true},
+		"include_content":    {Query: "q", Providers: []string{"a"}, Mode: model.SearchModeParallel, Limit: 10, IncludeContent: true},
+		"snippet_limit":      {Query: "q", Providers: []string{"a"}, Mode: model.SearchModeParallel, Limit: 10, SnippetLimit: 300},
+		"max_content_length": {Query: "q", Providers: []string{"a"}, Mode: model.SearchModeParallel, Limit: 10, ContentLimit: 500},
+	}
+	for name, req := range variants {
+		if o.cacheKey(req, nil) == baseKey {
+			t.Fatalf("%s 未参与缓存键：开关变化后键未变，会读到缺字段的旧缓存", name)
+		}
+	}
+}
+
+// TestApplyDefaultsClampsOutputLimits 断言两个长度上限在进入编排前就被夹紧。
+//
+// 必须在这里夹紧而不是只靠适配器：缓存键直接读这两个字段，放任超限值进来会让
+// 「999999 与 5000」算出两个不同的键却命中同一份实际结果（适配器都会夹到上限）。
+func TestApplyDefaultsClampsOutputLimits(t *testing.T) {
+	settings := model.RuntimeSettings{DefaultMode: model.SearchModeParallel, DefaultProviders: []string{"a"}, DefaultLimit: 10}
+	clamped := applyDefaults(model.SearchRequest{Query: "q", SnippetLimit: 99999, ContentLimit: -5}, settings)
+	if clamped.SnippetLimit != 1000 {
+		t.Fatalf("snippet_limit 应夹紧到渠道封顶 1000，实际 %d", clamped.SnippetLimit)
+	}
+	if clamped.ContentLimit != 0 {
+		t.Fatalf("负数 max_content_length 应归 0（表示用默认值），实际 %d", clamped.ContentLimit)
+	}
+	tooLarge := applyDefaults(model.SearchRequest{Query: "q", ContentLimit: 999999}, settings)
+	if tooLarge.ContentLimit != 50000 {
+		t.Fatalf("max_content_length 应夹紧到硬顶 50000，实际 %d", tooLarge.ContentLimit)
+	}
+	// 收紧值是合法输入，必须原样保留。
+	tightened := applyDefaults(model.SearchRequest{Query: "q", SnippetLimit: 300, ContentLimit: 1500}, settings)
+	if tightened.SnippetLimit != 300 || tightened.ContentLimit != 1500 {
+		t.Fatalf("收紧值不应被改写，实际 snippet=%d content=%d", tightened.SnippetLimit, tightened.ContentLimit)
+	}
+}
+
 func TestCacheTruncatesResultsOnWrite(t *testing.T) {
 	store := &orchestratorTestStore{
 		settings: model.RuntimeSettings{
