@@ -38,7 +38,7 @@ type Store interface {
 
 // urlExtractor 是「能按 URL 取回整页正文」的适配器所实现的**可选**接口。
 //
-// 刻意不把它并进 provider.Provider：那会逼着九个适配器全部实现 Extract，
+// 刻意不把它并进 provider.Provider：那会逼着十个适配器全部实现 Extract，
 // 而其中只有 tavily 有对应的上游能力。用类型断言探测能力，不满足时返回明确错误，
 // 新增渠道也不必为了满足接口而写一个总是报错的空实现。
 type urlExtractor interface {
@@ -564,6 +564,7 @@ func (o *Orchestrator) refreshOfficialQuota(key model.APIKey, proxyURL string) {
 // autoRefreshOfficialQuota 判断某渠道是否参与搜索后的自动额度刷新。
 // 默认 true（多数渠道的官方额度可查且值得刷新），只在明确「查不出额度」时才返回 false：
 // serper 无官方余额接口、brave 的查询要消耗一次真实请求、keenable 与 context7 无官方额度接口。
+// deepseek 有官方 /user/balance，因此保持 true（间隔见 quotaRefreshInterval）。
 // 漏加渠道会让它每 5 分钟自动查一次并把 unsupported 反复写库（功能无害但属于脏写）。
 func autoRefreshOfficialQuota(providerName string) bool {
 	switch providerName {
@@ -578,7 +579,7 @@ func quotaRefreshInterval(providerName string) time.Duration {
 	switch providerName {
 	case model.ProviderExa:
 		return 5 * time.Minute
-	case model.ProviderYou, model.ProviderJina, model.ProviderTavily, model.ProviderFirecrawl, model.ProviderSerper, model.ProviderBrave:
+	case model.ProviderYou, model.ProviderJina, model.ProviderTavily, model.ProviderFirecrawl, model.ProviderSerper, model.ProviderBrave, model.ProviderDeepSeek:
 		return time.Minute
 	default:
 		return 5 * time.Minute

@@ -95,7 +95,7 @@ export const faqChapter: DocChapter = {
           type: 'list',
           items: [
             '**症状**：请求写 `limit: 30`，实际只拿到 10 条或 20 条。',
-            '**原因**：有三层收敛。① 渠道的「请求结果数」`request_result_limit` 大于 0 时会**强制替换**请求里的 `limit`（管理台「运行」Tab 显示默认 10，保存过弹窗就会写入）；② 各家适配器还有自己的上限——tavily 与 brave 是 20、firecrawl 与 serper 是 100；③ 最终合并结果会再按 `limit` 截断。',
+            '**原因**：有三层收敛。① 渠道的「请求结果数」`request_result_limit` 大于 0 时会**强制替换**请求里的 `limit`（管理台「运行」Tab 显示默认 10，保存过弹窗就会写入）；② 各家适配器还有自己的上限——tavily 与 brave 是 20、firecrawl 与 serper 是 100、deepseek 是 50；③ 最终合并结果会再按 `limit` 截断。',
             '**处理**：到「平台管理 → 运行」Tab 把「请求结果数」调到与预期一致或设为 1 以上的合理值；同时确认目标渠道的上限不低于你想要的数量。'
           ]
         },
@@ -114,7 +114,7 @@ export const faqChapter: DocChapter = {
           items: [
             '**症状**：`include_raw: true` 的请求，结果里没有 `raw` 字段。',
             '**原因**：该字段只在渠道真的回传了原始条目时才填充，不是开关一开就一定出现。',
-            '**处理**：先确认渠道本身会给原始条目（`tavily` / `firecrawl` / `brave` 会因该开关改变上游请求，其余渠道只是把已有响应原样带出）；再用 `cache: "bypass"` 排除读到旧缓存的可能。',
+            '**处理**：先确认渠道本身会给原始条目（`tavily` / `firecrawl` / `brave` / `deepseek` 会因该开关改变上游请求，其余渠道只是把已有响应原样带出）；再用 `cache: "bypass"` 排除读到旧缓存的可能。',
             '**注**：`include_raw` 已参与缓存键计算，因此不会再出现「参数不同却命中同一份缓存」的串味。'
           ]
         },
@@ -125,7 +125,7 @@ export const faqChapter: DocChapter = {
             '**症状**：`results[]` 里只有 `title` / `url` / `snippet`，没有 `content`。',
             '**原因**：正文**默认不返回**（`include_content` 默认 `false`）。一条正文实测可达数万字符，默认带上会挤爆模型上下文。',
             '**处理**：需要正文时显式传 `include_content: true`，并用 `max_content_length` 控制长度。更推荐的做法是**按需抓取**：先看 `snippet` 判断哪几条值得读，再对目标 `url` 调 `/v1/fetch` 取全文（支持 `start_index` 续读，正文质量也比搜索附带的那份稳定）。',
-            '**注意**：`serper` 与 `keenable` 的正文与摘要同源，打开开关也只是同一段文本按更宽的上限再截一次；`context7` 的正文是代码示例本身，需要代码示例时必须打开这个开关。'
+            '**注意**：`serper` 与 `keenable` 的正文与摘要同源，打开开关也只是同一段文本按更宽的上限再截一次；`deepseek` 的正文优先 `content`、空时回退 `summary`；`context7` 的正文是代码示例本身，需要代码示例时必须打开这个开关。'
           ]
         },
         { type: 'heading', text: '别人的请求命中了我看到的缓存', level: 4 },

@@ -747,7 +747,7 @@ func (s *Store) UpdateProviderKeyOfficialQuota(ctx context.Context, id int64, qu
 
 func officialQuotaCanExhaustKey(providerName string) bool {
 	switch providerName {
-	case model.ProviderYou, model.ProviderJina, model.ProviderTavily, model.ProviderFirecrawl, model.ProviderBrave:
+	case model.ProviderYou, model.ProviderJina, model.ProviderTavily, model.ProviderFirecrawl, model.ProviderBrave, model.ProviderDeepSeek:
 		return true
 	default:
 		return false
@@ -1057,6 +1057,10 @@ func (s *Store) insertCallUsage(ctx context.Context, tx pgx.Tx, searchRequestID 
 	rate := billing.RateFromSettings(call.ProviderName, settings)
 	measurements := append([]model.UsageMeasurement{}, call.Usage...)
 	if len(measurements) == 0 {
+		// DeepSeek 官方只对 results 非空的成功 Search 计费，空结果不补 requests:1。
+		if call.ResultCount <= 0 && !billing.EmptyResultsBillable(call.ProviderName) {
+			return nil
+		}
 		if credits := billing.DefaultRequestCreditsWithRate(rate); credits > 0 {
 			measurements = append(measurements, model.UsageMeasurement{Unit: "credits", Quantity: credits})
 		}

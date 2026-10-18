@@ -60,3 +60,23 @@ func TestNextKeyStatus(t *testing.T) {
 		})
 	}
 }
+
+// TestOfficialQuotaCanExhaustKey 锁定哪些渠道的官方余额可以自动把 Key 置为 exhausted。
+// DeepSeek 的 /user/balance 返回真实剩余余额（不可用时查询侧归零），应参与；
+// Serper 的余额是本地估算、Exa 的 usage 不是余额，都不应参与。
+func TestOfficialQuotaCanExhaustKey(t *testing.T) {
+	cases := []struct {
+		provider string
+		want     bool
+	}{
+		{provider: model.ProviderDeepSeek, want: true},
+		{provider: model.ProviderYou, want: true},
+		{provider: model.ProviderSerper, want: false},
+		{provider: model.ProviderExa, want: false},
+	}
+	for _, tc := range cases {
+		if got := officialQuotaCanExhaustKey(tc.provider); got != tc.want {
+			t.Fatalf("%s => %v, want %v", tc.provider, got, tc.want)
+		}
+	}
+}

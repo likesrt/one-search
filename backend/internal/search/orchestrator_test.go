@@ -745,10 +745,10 @@ func TestSearchFallbackSkipsFailedProvider(t *testing.T) {
 // resolveBaseURL 的解析优先级：key 级覆盖 -> 渠道默认，且两侧都做 TrimSpace。
 func TestResolveBaseURL(t *testing.T) {
 	cases := []struct {
-		name             string
-		keyBaseURL       string
-		providerBaseURL  string
-		want             string
+		name            string
+		keyBaseURL      string
+		providerBaseURL string
+		want            string
 	}{
 		{name: "key 覆盖优先并去除空白", keyBaseURL: "  https://key.example.com/res/v1  ", providerBaseURL: "https://provider.example.com", want: "https://key.example.com/res/v1"},
 		{name: "key 为空串回退渠道", keyBaseURL: "", providerBaseURL: "https://provider.example.com", want: "https://provider.example.com"},
@@ -1034,5 +1034,37 @@ func TestSearchRebuildsAdapterPerKeyBaseURL(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&secondHits); got != 1 {
 		t.Fatalf("second key base_url hits = %d, want 1", got)
+	}
+}
+
+// TestAutoRefreshOfficialQuota 锁定自动刷新开关：DeepSeek 有官方 /user/balance，
+// 必须参与；无官方余额接口或查询会消耗真实请求的渠道仍然不参与。
+func TestAutoRefreshOfficialQuota(t *testing.T) {
+	cases := []struct {
+		provider string
+		want     bool
+	}{
+		{provider: model.ProviderDeepSeek, want: true},
+		{provider: model.ProviderExa, want: true},
+		{provider: model.ProviderSerper, want: false},
+		{provider: model.ProviderBrave, want: false},
+		{provider: model.ProviderKeenable, want: false},
+		{provider: model.ProviderContext7, want: false},
+	}
+	for _, tc := range cases {
+		if got := autoRefreshOfficialQuota(tc.provider); got != tc.want {
+			t.Fatalf("%s => %v, want %v", tc.provider, got, tc.want)
+		}
+	}
+}
+
+// TestQuotaRefreshInterval 锁定刷新间隔：Exa 5 分钟，其余支持刷新的渠道 1 分钟。
+// DeepSeek 的余额查询免费且轻量，归入 1 分钟档。
+func TestQuotaRefreshInterval(t *testing.T) {
+	if got := quotaRefreshInterval(model.ProviderDeepSeek); got != time.Minute {
+		t.Fatalf("deepseek interval = %v, want %v", got, time.Minute)
+	}
+	if got := quotaRefreshInterval(model.ProviderExa); got != 5*time.Minute {
+		t.Fatalf("exa interval = %v, want %v", got, 5*time.Minute)
 	}
 }

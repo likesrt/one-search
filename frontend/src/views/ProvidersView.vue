@@ -510,7 +510,10 @@ const DEFAULT_PROVIDER_PRICING: Record<string, { price_per_request: number; pric
   keenable: { price_per_request: 0, price_per_credit: 0, price_per_token: 0, default_billable_credits: 0 },
   // Context7 同样没有公开的按次单价（免费层 + 订阅制，官方不公布单次调用价），
   // 因此四个字段都填 0，与 keenable 同口径 —— 填 0 比编一个假单价诚实，需要成本估算时在「计费」Tab 自填。
-  context7: { price_per_request: 0, price_per_credit: 0, price_per_token: 0, default_billable_credits: 0 }
+  context7: { price_per_request: 0, price_per_credit: 0, price_per_token: 0, default_billable_credits: 0 },
+  // DeepSeek Search 官方 5 元/1,000 次成功请求（仅 results 非空计费），官方以 CNY 计价；
+  // 仪表盘统一按 USD 估算，这里按近似汇率折算约 $0.0007/次，汇率变动时可在「计费」Tab 覆盖。
+  deepseek: { price_per_request: 0.0007, price_per_credit: 0, price_per_token: 0, default_billable_credits: 0 }
 }
 
 function defaultPricingFor(name: string) {
@@ -647,6 +650,7 @@ function providerShortName(name: string) {
   if (/brave/i.test(name)) return 'B'
   if (/keenable/i.test(name)) return 'K'
   if (/context7/i.test(name)) return 'C'
+  if (/deepseek/i.test(name)) return 'D'
   return (name || 'S').slice(0, 1).toUpperCase()
 }
 
@@ -710,6 +714,14 @@ function quotaMetaText(row: EditableKey) {
   if (row.provider_name === 'exa') return `用量 ${formatCurrency(row.official_quota_used_usd)}`
   if (row.provider_name === 'tavily' || row.provider_name === 'firecrawl' || row.provider_name === 'serper') return `额度 ${formatNumber(row.official_quota_balance)} credits`
   if (row.provider_name === 'brave') return `额度 ${formatNumber(row.official_quota_balance)} requests`
+  if (row.provider_name === 'deepseek') {
+    // DeepSeek /user/balance 可能返回 CNY 或 USD；用官方币种展示，未知单位退化为纯数字。
+    const unit = (row.official_quota_unit || '').toLowerCase()
+    const symbol = unit === 'cny' ? '¥' : unit === 'usd' ? '$' : ''
+    return symbol
+      ? `额度 ${symbol}${formatNumber(row.official_quota_balance)}`
+      : `额度 ${formatNumber(row.official_quota_balance)} ${row.official_quota_unit || ''}`.trim()
+  }
   return `额度 ${formatNumber(row.official_quota_balance)}`
 }
 

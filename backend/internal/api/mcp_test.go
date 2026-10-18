@@ -257,6 +257,24 @@ func TestMCPGuidesModelToContext7First(t *testing.T) {
 	}
 }
 
+// TestMCPProvidersDescriptionListsDeepSeek 锁定 providers 描述里的通用渠道清单包含 deepseek。
+// enum 由 model.DefaultProviders 自动带出，但 description 是手写字符串；漏改时模型看得到
+// deepseek 这个值却不知道它也是通用网页搜索渠道，这里用一条最小断言防止文案回退。
+func TestMCPProvidersDescriptionListsDeepSeek(t *testing.T) {
+	h := &Handler{}
+	r := chi.NewRouter()
+	h.mountMCP(r, "/mcp")
+
+	toolsResp := mcpListTools(t, r)
+	tool, ok := mcpToolByName(toolsResp.Result.Tools, "search")
+	if !ok {
+		t.Fatalf("search tool missing: %+v", toolsResp.Result.Tools)
+	}
+	if !strings.Contains(mcpProvidersDescription(t, tool), model.ProviderDeepSeek) {
+		t.Fatalf("providers 描述未提及 deepseek")
+	}
+}
+
 // TestMCPProvidersDescriptionWarnsEnumIsNotAvailability 锁定 providers 描述里的
 // 「合法值是全集，不等于可用集」这句免责声明。
 //

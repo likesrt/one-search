@@ -432,8 +432,174 @@ func TestKeenableProviderAnonymousEndpoint(t *testing.T) {
 	}
 }
 
-// TestProviderSupportsAnonymousKey 覆盖全部九家渠道的 SupportsAnonymousKey 取值：
-// 只有实测确认无密钥可用的 context7 与 keenable 返回 true，其余七家走 HTTPProvider 默认实现返回 false。
+// TestDeepSeekProviderSearch 覆盖 DeepSeek Search 的正常路径：端点 /v1/tools/search、
+// Bearer 鉴权、count 夹到 50、need_content 与 options 透传，以及 snippet/content 的
+// summary 兜底、rerank_score 归一化、缺 url 剔除和 raw 填充。
+func TestDeepSeekProviderSearch(t *testing.T) {
+	var gotBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/tools/search" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer deepseek-key" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeJSON(t, w, map[string]interface{}{
+			"results": []map[string]interface{}{
+				{
+					"title":        "DeepSeek V4 发布",
+					"url":          "https://example.com/deepseek-v4",
+					"snippet":      "short snippet",
+					"summary":      "long summary",
+					"content":      "full body",
+					"rerank_score": 2.4,
+					"date":         "2026-06-01T00:00:00+00:00",
+				},
+				{
+					"title":        "No snippet",
+					"url":          "https://example.com/no-snippet",
+					"snippet":      "",
+					"summary":      "fallback summary",
+					"content":      "",
+					"rerank_score": 0,
+				},
+				{"title": "missing url", "snippet": "dropped"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	provider := NewDeepSeekProvider(Config{BaseURL: server.URL})
+	response, err := provider.Search(context.Background(), model.SearchRequest{
+		Query:          "DeepSeek V4",
+		Limit:          60,
+		IncludeContent: true,
+		IncludeRaw:     true,
+		Options: map[string]interface{}{
+			"ori_question": "DeepSeek 新模型有哪些改进",
+			"localization": "1.2.3.4",
+		},
+	}, model.APIKey{Value: "deepseek-key"})
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if gotBody["query"] != "DeepSeek V4" || gotBody["count"] != float64(50) || gotBody["need_content"] != true {
+		t.Fatalf("unexpected request body: %#v", gotBody)
+	}
+	if gotBody["ori_question"] != "DeepSeek 新模型有哪些改进" || gotBody["localization"] != "1.2.3.4" {
+		t.Fatalf("options 未透传: %#v", gotBody)
+	}
+	if len(response.Results) != 2 {
+		t.Fatalf("unexpected result count: %#v", response.Results)
+	}
+	first := response.Results[0]
+	if first.Provider != model.ProviderDeepSeek || len(first.Providers) != 1 || first.Providers[0] != model.ProviderDeepSeek {
+		t.Fatalf("unexpected provider: %#v", first)
+	}
+	if first.Snippet != "short snippet" || first.Content != "full body" || first.Score < 0.79 || first.Score > 0.81 || first.PublishedAt == nil || first.Raw == nil {
+		t.Fatalf("unexpected first result: %#v", first)
+	}
+	second := response.Results[1]
+	if second.Snippet != "fallback summary" || second.Content != "fallback summary" || second.Score != 0.5 {
+		t.Fatalf("unexpected second result: %#v", second)
+	}
+}
+
+// TestDeepSeekProviderRequestBody 覆盖请求体的默认值与开关：
+// limit<=0 取 10、超 50 夹到 50；need_content 只随 include_content/include_raw 打开；
+// options 为空时不写 ori_question/localization。
+func TestDeepSeekProviderRequestBody(t *testing.T) {
+	cases := []struct {
+		name           string
+		limit          int
+		includeContent bool
+		includeRaw     bool
+		options        map[string]interface{}
+		wantCount      float64
+		wantNeed       bool
+	}{
+		{name: "默认值", limit: 0, wantCount: 10},
+		{name: "上限夹紧", limit: 60, wantCount: 50},
+		{name: "要正文", limit: 5, includeContent: true, wantCount: 5, wantNeed: true},
+		{name: "要原始条目", limit: 5, includeRaw: true, wantCount: 5, wantNeed: true},
+		{name: "显式 options", limit: 5, options: map[string]interface{}{"ori_question": "原始问题", "localization": "1.1.1.1"}, wantCount: 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody map[string]interface{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Fatalf("decode request body: %v", err)
+				}
+				writeJSON(t, w, map[string]interface{}{"results": []map[string]interface{}{}})
+			}))
+			defer server.Close()
+
+			provider := NewDeepSeekProvider(Config{BaseURL: server.URL})
+			if _, err := provider.Search(context.Background(), model.SearchRequest{
+				Query:          "golang",
+				Limit:          tc.limit,
+				IncludeContent: tc.includeContent,
+				IncludeRaw:     tc.includeRaw,
+				Options:        tc.options,
+			}, model.APIKey{Value: "deepseek-key"}); err != nil {
+				t.Fatalf("Search returned error: %v", err)
+			}
+			if gotBody["count"] != tc.wantCount {
+				t.Fatalf("count = %v, want %v", gotBody["count"], tc.wantCount)
+			}
+			if _, ok := gotBody["need_content"]; ok != tc.wantNeed {
+				t.Fatalf("need_content presence = %v, want %v (body %#v)", ok, tc.wantNeed, gotBody)
+			}
+			if tc.options == nil {
+				if _, ok := gotBody["ori_question"]; ok {
+					t.Fatalf("空 options 不应发送 ori_question: %#v", gotBody)
+				}
+				if _, ok := gotBody["localization"]; ok {
+					t.Fatalf("空 options 不应发送 localization: %#v", gotBody)
+				}
+			}
+		})
+	}
+}
+
+// TestDeepSeekProviderErrors 锁定上游错误到统一错误类型的映射：401/403 鉴权、402 额度、
+// 429 限流；分类逻辑在 ClassifyHTTPError，这里只验证适配器确实走了那条路径。
+func TestDeepSeekProviderErrors(t *testing.T) {
+	cases := []struct {
+		status int
+		want   string
+	}{
+		{status: http.StatusUnauthorized, want: ErrorTypeAuth},
+		{status: http.StatusPaymentRequired, want: ErrorTypeQuotaExhausted},
+		{status: http.StatusTooManyRequests, want: ErrorTypeRateLimited},
+	}
+	for _, tc := range cases {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeJSONStatus(t, w, tc.status, map[string]interface{}{
+					"error": map[string]interface{}{"message": "upstream says no", "type": "invalid_request_error", "code": "invalid_request_error"},
+				})
+			}))
+			defer server.Close()
+
+			provider := NewDeepSeekProvider(Config{BaseURL: server.URL})
+			_, err := provider.Search(context.Background(), model.SearchRequest{Query: "golang"}, model.APIKey{Value: "deepseek-key"})
+			if err == nil {
+				t.Fatalf("expected error for status %d", tc.status)
+			}
+			if got := ErrorType(err); got != tc.want {
+				t.Fatalf("ErrorType = %q, want %q (err %v)", got, tc.want, err)
+			}
+		})
+	}
+}
+
+// TestProviderSupportsAnonymousKey 覆盖全部十家渠道的 SupportsAnonymousKey 取值：
+// 只有实测确认无密钥可用的 context7 与 keenable 返回 true，其余八家走 HTTPProvider 默认实现返回 false。
 // 该标志仅用于管理台提示，不参与放行判断，因此这里只断言「渠道级常量」的取值，
 // 并顺带确认未在 Registry 中注册的渠道名不会 panic。
 func TestProviderSupportsAnonymousKey(t *testing.T) {
@@ -451,6 +617,7 @@ func TestProviderSupportsAnonymousKey(t *testing.T) {
 		{name: model.ProviderFirecrawl, provider: NewFirecrawlProvider(Config{})},
 		{name: model.ProviderSerper, provider: NewSerperProvider(Config{})},
 		{name: model.ProviderBrave, provider: NewBraveProvider(Config{})},
+		{name: model.ProviderDeepSeek, provider: NewDeepSeekProvider(Config{})},
 	}
 	for _, tc := range cases {
 		if got := tc.provider.SupportsAnonymousKey(); got != tc.want {

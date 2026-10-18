@@ -4,8 +4,8 @@
  * 都直接消费这份列表，无需逐个视图改动。
  *
  * 注意 `defaultProviders` 由本列表派生，因此它取的是「内置渠道全集」而不是
- * 「运行期默认路由」——后者由后端 `settings.default_providers` 决定，出厂仍是
- * 前八个通用搜索渠道，不含末尾的 context7（文档检索渠道，需显式指定）。
+ * 「运行期默认路由」——后者由后端 `settings.default_providers` 决定，出厂是
+ * 9 个通用搜索渠道（含 deepseek，不含 context7；context7 需显式指定）。
  */
 export const providerOptions = [
   { label: 'Exa', value: 'exa' },
@@ -16,7 +16,8 @@ export const providerOptions = [
   { label: 'Serper', value: 'serper' },
   { label: 'Brave Search', value: 'brave' },
   { label: 'Keenable', value: 'keenable' },
-  { label: 'Context7', value: 'context7' }
+  { label: 'Context7', value: 'context7' },
+  { label: 'DeepSeek', value: 'deepseek' }
 ]
 
 export const defaultProviders = providerOptions.map((item) => item.value)

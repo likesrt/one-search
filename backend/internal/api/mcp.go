@@ -561,7 +561,7 @@ func mcpSearchToolSchema() map[string]interface{} {
 				},
 				"providers": map[string]interface{}{
 					"type":        "array",
-					"description": "Optional providers to use; defaults to runtime settings. Valid values: exa, you, jina, tavily, firecrawl, serper, brave, keenable (general web search) and context7 (open-source library, framework and SDK documentation with runnable code examples). This is the full set, not a guarantee of availability: a provider the operator disabled or left without an API key is skipped or returns an error, so fall back to the default routing instead of retrying it.",
+					"description": "Optional providers to use; defaults to runtime settings. Valid values: exa, you, jina, tavily, firecrawl, serper, brave, keenable, deepseek (general web search) and context7 (open-source library, framework and SDK documentation with runnable code examples). This is the full set, not a guarantee of availability: a provider the operator disabled or left without an API key is skipped or returns an error, so fall back to the default routing instead of retrying it.",
 					"items":       map[string]interface{}{"type": "string", "enum": model.DefaultProviders},
 				},
 				"mode": map[string]interface{}{

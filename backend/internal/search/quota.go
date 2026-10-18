@@ -24,6 +24,7 @@ var (
 	tavilyUsageURL          = "https://api.tavily.com/usage"
 	firecrawlCreditUsageURL = "https://api.firecrawl.dev/v2/team/credit-usage"
 	braveWebSearchURL       = "https://api.search.brave.com/res/v1/web/search"
+	deepseekBalanceURL      = "https://api.deepseek.com/user/balance"
 	quotaRequestTimeout     = 20 * time.Second
 )
 
@@ -46,6 +47,8 @@ func QueryOfficialQuota(ctx context.Context, key model.APIKey, req model.Provide
 		return querySerperQuota(ctx, key)
 	case model.ProviderBrave:
 		return queryBraveQuota(ctx, key, req.ProxyURL)
+	case model.ProviderDeepSeek:
+		return queryDeepSeekQuota(ctx, key, req.ProxyURL)
 	default:
 		return model.ProviderKeyQuotaResult{Provider: key.ProviderName, Alias: key.Alias, Supported: false, Status: "unsupported", Message: "该渠道暂未配置官方额度查询", FetchedAt: time.Now()}, nil
 	}
@@ -327,6 +330,85 @@ func queryBraveQuota(ctx context.Context, key model.APIKey, proxyURL string) (mo
 		RawText:       rateLimitRawText(header),
 		FetchedAt:     time.Now(),
 	}, nil
+}
+
+func queryDeepSeekQuota(ctx context.Context, key model.APIKey, proxyURL string) (model.ProviderKeyQuotaResult, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, deepseekBalanceURL, nil)
+	if err != nil {
+		return model.ProviderKeyQuotaResult{}, err
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+key.Value)
+	payload, err := doJSONQuotaRequest(httpReq, proxyURL)
+	if err != nil {
+		return model.ProviderKeyQuotaResult{}, err
+	}
+	infos := objectArrayFromAny(payload["balance_infos"])
+	if len(infos) == 0 {
+		return model.ProviderKeyQuotaResult{
+			Provider:  key.ProviderName,
+			Alias:     key.Alias,
+			Supported: false,
+			Status:    "unsupported",
+			Message:   "DeepSeek 官方 /user/balance 响应中没有 balance_infos",
+			Raw:       payload,
+			FetchedAt: time.Now(),
+		}, nil
+	}
+	// is_available 缺失时按 true 处理，避免把老响应误判成「余额耗尽」。
+	available := true
+	if value, ok := payload["is_available"].(bool); ok {
+		available = value
+	}
+	// 多币种账户优先取第一条有余额的币种；全部为 0 时取第一条。这样不会因为
+	// CNY 为 0、USD 有余额而把可用账户误标成 exhausted。
+	selected := infos[0]
+	for _, item := range infos {
+		if firstNumber(item, "total_balance") > 0 {
+			selected = item
+			break
+		}
+	}
+	currency := strings.ToUpper(stringFromAny(selected["currency"]))
+	total := firstNumber(selected, "total_balance")
+	if !available {
+		// 账户被上游判定不可用时按 0 处理，交给 officialQuotaCanExhaustKey 标记 exhausted。
+		total = 0
+	}
+	message := fmt.Sprintf("DeepSeek 官方 /user/balance 返回账户余额（%s）", currency)
+	if !available {
+		message += "，当前账户不可用"
+	}
+	result := model.ProviderKeyQuotaResult{
+		Provider:  key.ProviderName,
+		Alias:     key.Alias,
+		Supported: true,
+		Status:    "success",
+		Unit:      strings.ToLower(currency),
+		Balance:   floatPtr(total),
+		Message:   message,
+		Breakdown: deepseekBalanceBreakdown(infos),
+		Raw:       payload,
+		FetchedAt: time.Now(),
+	}
+	if currency == "USD" {
+		result.BalanceUSD = floatPtr(total)
+	}
+	return result, nil
+}
+
+// deepseekBalanceBreakdown 把 balance_infos 的每个币种条目原样收进 breakdown，
+// 便于管理台在详情里看到赠金与充值余额的拆分；结构不符的条目跳过。
+func deepseekBalanceBreakdown(infos []map[string]interface{}) []map[string]interface{} {
+	breakdown := make([]map[string]interface{}, 0, len(infos))
+	for _, info := range infos {
+		item := map[string]interface{}{"scope": "balance"}
+		for key, value := range info {
+			item[key] = value
+		}
+		breakdown = append(breakdown, item)
+	}
+	return breakdown
 }
 
 func doJSONQuotaRequest(req *http.Request, proxyURL string) (map[string]interface{}, error) {

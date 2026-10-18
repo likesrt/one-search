@@ -12,16 +12,18 @@ const (
 	ProviderBrave     = "brave"
 	ProviderKeenable  = "keenable"
 	ProviderContext7  = "context7"
+	ProviderDeepSeek  = "deepseek"
 )
 
-// DefaultProviders 是内置渠道的默认顺序。
+// DefaultProviders 是内置渠道的完整顺序。
 // 顺序对外可见（MCP 的 enum 与文档都按此顺序列举），新增渠道只能追加到末尾，
 // 否则会改变既有默认路由的优先级语义。
 //
 // 注意：本列表只决定 MCP providers enum 能列出的渠道，不等于运行期默认路由。
-// context7 在此列出仅是让模型能传这个值；settings.default_providers 未被迁移改写，
-// 因此默认搜索仍只走前 8 家，context7 只在显式 providers:["context7"] 时参与。
-var DefaultProviders = []string{ProviderExa, ProviderYou, ProviderJina, ProviderTavily, ProviderFirecrawl, ProviderSerper, ProviderBrave, ProviderKeenable, ProviderContext7}
+// context7 在此列出仅是让模型能传这个值；0017 刻意没有把它写进 settings.default_providers，
+// 因此 context7 只在显式 providers:["context7"] 时参与。deepseek 是通用搜索渠道，
+// 已由 0018 迁移并入从未自定义过的默认列表（默认路由共 9 家，不含 context7）。
+var DefaultProviders = []string{ProviderExa, ProviderYou, ProviderJina, ProviderTavily, ProviderFirecrawl, ProviderSerper, ProviderBrave, ProviderKeenable, ProviderContext7, ProviderDeepSeek}
 
 type SearchMode string
 

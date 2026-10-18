@@ -17,6 +17,8 @@ import (
 // - Brave Search: $5 / 1k → $0.005/req
 // - Firecrawl Search: 2 credits / 10 results；≈$0.00083/credit
 // - Jina: ≈ $0.05 / 1M tokens；Search fallback ≈$0.0005/req
+// - DeepSeek Search: ¥5 / 1k 成功请求 → ¥0.005/req；按 1 USD≈7.2 CNY 折算约 $0.0007/req
+//   （官方以 CNY 计价，这里只是仪表盘的 USD 估算，汇率变动时请在渠道「计费」覆盖）
 
 type Rate struct {
 	PerRequest            float64 `json:"price_per_request,omitempty"`
@@ -33,6 +35,22 @@ var defaultRates = map[string]Rate{
 	"brave":     {PerRequest: 0.005},
 	"firecrawl": {PerRequest: 0.00166, PerCredit: 0.00083, DefaultBillableCredit: 2},
 	"jina":      {PerRequest: 0.0005, PerToken: 0.05 / 1_000_000},
+	"deepseek":  {PerRequest: 0.0007},
+}
+
+// EmptyResultsBillable 报告某渠道是否对「HTTP 200 但结果为空」的调用计费。
+//
+// 默认 true，保持既有渠道「一次成功调用 = 一次 requests」的口径。DeepSeek 官方明确
+// 只对 results 非空的成功 Search 请求计费，因此返回 false；store.insertCallUsage 据此
+// 跳过 requests:1 的兜底，避免本地成本估算比官方账单偏高。
+// 纯函数，无副作用。
+func EmptyResultsBillable(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "deepseek":
+		return false
+	default:
+		return true
+	}
 }
 
 func DefaultRate(provider string) Rate {

@@ -1,14 +1,14 @@
 /**
  * 章节：渠道配置详解
  *
- * 覆盖范围：九家渠道的默认地址、认证头、端点与路径、结果数上限、支持的 Options 键、
+ * 覆盖范围：十家渠道的默认地址、认证头、端点与路径、结果数上限、支持的 Options 键、
  * 正文与 usage 的来源、官方额度查询方式与易错点；渠道级 settings 键全集；
  * key 级 base_url 覆盖与 `#` 完整端点语法；key 级代理三态；官方额度查询支持矩阵；
  * 空密钥（匿名）条目的语义与支持匿名的渠道差异。
  *
  * 代码依据：
  * - `backend/internal/provider/exa.go`、`you.go`、`jina.go`、`tavily.go`、`firecrawl.go`、
- *   `serper.go`、`brave.go`、`keenable.go`、`context7.go`（各自拼装的请求体/查询参数与结果归一化，
+ *   `serper.go`、`brave.go`、`keenable.go`、`context7.go`、`deepseek.go`（各自拼装的请求体/查询参数与结果归一化，
  *   以及 `SupportsAnonymousKey` 的取值与 keenable 的匿名端点/请求头分支）
  * - `backend/internal/provider/helpers.go`（`requestLimit` 的 fallback/max、`usageMeasurements`、
  *   `optionString`/`optionInt`/`optionStringSlice`）
@@ -18,10 +18,10 @@
  * - `backend/internal/search/quota.go`（各渠道官方额度端点与口径）
  * - `backend/internal/db/store.go`（`UpdateProviderKey` 的 COALESCE 语义、`validateProviderKeyBaseURL`）
  *
- * 注意：`context7` 是文档检索渠道，**不在默认渠道列表内**（默认路由仍是前八家通用搜索渠道），
+ * 注意：`context7` 是文档检索渠道，**不在默认渠道列表内**（默认路由是 9 个通用搜索渠道，含 deepseek），
  * 只有显式在 `providers` 里指定时才会参与。
  *
- * 本节只描述口径，不重复抄写单价数字——内置价目表在 Go 侧与前端各有一份副本，
+ * 本节会注明官方 CNY 定价与折算口径，但不逐项抄写网关生效的 USD 覆盖值——内置价目表在 Go 侧与前端各有一份副本，
  * 要查当前生效值请看「平台管理 → 计费」Tab 与「仪表盘 → 成本估算」。
  */
 
@@ -33,7 +33,7 @@ export const providersChapter: DocChapter = {
   sections: [
     {
       id: 'providers-matrix',
-      title: '九家渠道速查表',
+      title: '十家渠道速查表',
       blocks: [
         {
           type: 'table',
@@ -47,7 +47,8 @@ export const providersChapter: DocChapter = {
             ['serper', '`https://google.serper.dev`', '`X-API-KEY`', '`POST /search`', '100', '是'],
             ['brave', '`https://api.search.brave.com/res/v1`', '`X-Subscription-Token`', '`GET /web/search`', '20', '是'],
             ['keenable', '`https://api.keenable.ai`', '`X-API-Key`（为空时改走 `X-Keenable-Title`）', '`POST /v1/search`（为空时 `POST /v1/search/public`）', '50', '是'],
-            ['context7', '`https://context7.com/api`', '`Authorization: Bearer`（可为空）', '`GET /v3/search`', '**不支持**', '是']
+            ['context7', '`https://context7.com/api`', '`Authorization: Bearer`（可为空）', '`GET /v3/search`', '**不支持**', '是'],
+            ['deepseek', '`https://api.deepseek.com`', '`Authorization: Bearer`', '`POST /v1/tools/search`', '50', '是']
           ]
         },
         {
@@ -64,7 +65,7 @@ export const providersChapter: DocChapter = {
           type: 'callout',
           tone: 'warn',
           title: '`context7` 是文档检索渠道，不在默认渠道列表内',
-          text: '前八家都是通用网页搜索，`context7` 检索的是开源库/框架的权威文档与可运行代码示例。它的定位是「查库文档」，因此**出厂默认路由（`default_providers`）里没有它**，存量用户的默认搜索行为也不受影响；只有请求显式传 `providers: ["context7"]` 时它才会参与。反过来说，MCP 的 `providers` 枚举包含全部九家，枚举里有它、默认却不用它，这是有意设计而不是 bug。'
+          text: '9 个通用网页搜索渠道（含 deepseek）都可用；`context7` 检索的是开源库/框架的权威文档与可运行代码示例。它的定位是「查库文档」，因此**出厂默认路由（`default_providers`）里没有它**，存量用户的默认搜索行为也不受影响；只有请求显式传 `providers: ["context7"]` 时它才会参与。反过来说，MCP 的 `providers` 枚举包含全部十家，枚举里有它、默认却不用它，这是有意设计而不是 bug。'
         }
       ]
     },
@@ -185,7 +186,7 @@ export const providersChapter: DocChapter = {
         { type: 'heading', text: 'context7', level: 4 },
         {
           type: 'paragraph',
-          text: '**它是文档检索渠道，不是通用网页搜索**：检索 GitHub 仓库的结构化文档与代码片段，适合「某个库/框架/SDK 怎么用」这类问题，对时事、非库类主题、通用网页问题不适用。前八家渠道拿到的是博客、问答与营销页，这正是补它的原因。'
+          text: '**它是文档检索渠道，不是通用网页搜索**：检索 GitHub 仓库的结构化文档与代码片段，适合「某个库/框架/SDK 怎么用」这类问题，对时事、非库类主题、通用网页问题不适用。其余九个通用渠道拿到的是博客、问答与营销页，这正是补它的原因。'
         },
         {
           type: 'list',
@@ -213,6 +214,28 @@ export const providersChapter: DocChapter = {
           tone: 'info',
           title: '它不会被默认选中',
           text: '`context7` 不在出厂默认渠道列表里，不显式指定就永远不会被调用，也不会影响存量用户的默认搜索行为。MCP 客户端侧的引导是：涉及库/框架/SDK/API 用法的问题先显式传 `providers: ["context7"]` 取权威文档，**结果为空时再用其它渠道补充**。'
+        },
+        { type: 'heading', text: 'deepseek', level: 4 },
+        {
+          type: 'list',
+          items: [
+            '端点固定 `POST /v1/tools/search`，鉴权 `Authorization: Bearer sk-...`；默认 base_url 是 `https://api.deepseek.com`，端点由适配器拼接，key 级覆盖只写到域名即可。',
+            '**只接 Search，不接 Fetch**：DeepSeek 文档里的 `/v1/tools/fetch` 不进入网关的 `/v1/fetch` 抓取链路，也不作为 Tavily 回退；`include_content` 用的是 Search 接口自己的 `need_content` 参数。',
+            '请求体为 `query`、`count`、可选的 `need_content`、`ori_question`、`localization`。`count` 夹紧到 1–50，`limit` ≤ 0 时取 10；`query` 限制 1–128 个 Unicode 字符，超长由上游返回 400，网关不静默截断。',
+            '支持的 `options` 键：`ori_question`（别名 `oriQuestion`）与 `localization`（IP 地址，用于本地化）；`freshness` 不读取，时间约束用 query 语法 `after:` / `before:`。',
+            '`include_content` 或 `include_raw` 任一为真时发送 `need_content: true`；前者用于填充正文，后者让原始条目里也带 `content`。默认不请求正文以减小响应体量；官方按请求计费，`need_content` 不改变单价。',
+            '结果取 `results` 数组，缺 `url` 的条目直接丢弃。摘要优先 `snippet`、空时用 `summary` 兜底；正文优先 `content`、空时同样回退 `summary`，再按请求的字节上限截断。',
+            '`rerank_score` 是 0–3 的原始分，适配器除以 3 归一到 0–1 再参与跨渠道排序，避免压过其它渠道；字段缺失或 ≤0 时回退 `1/(序号+1)`。`date` 按 RFC 3339 解析为 `published_at`。',
+            '**官方计费：每 1,000 次成功请求 5 元**，只有 HTTP 200 且 `results` 非空的请求计费；失败、空结果、超时不计费，`count` 不影响价格。网关统一用 USD 估算，内置单价按近似汇率折算约 `$0.0007/次`，汇率变动时在渠道「计费」Tab 覆盖。',
+            '**官方限速每个账号 5 QPS**（不随 API Key 数量放大）；超过时上游返回 429，网关按 `rate_limited` 处理。',
+            '上游响应不含 usage 字段，正常只会被记 `requests: 1`；空结果在计费侧特判为不记 requests（与官方「仅非空结果计费」对齐）。'
+          ]
+        },
+        {
+          type: 'callout',
+          tone: 'info',
+          title: 'DeepSeek 有官方余额接口',
+          text: '点「查询官方额度」会请求 `GET https://api.deepseek.com/user/balance`（Bearer），返回 `is_available` 与 `balance_infos[]`，币种可能是 CNY 或 USD；管理台按币种显示 `¥110.00` / `$50.00`。该查询参与自动刷新（1 分钟）。余额为 0 或 `is_available=false` 时密钥会被标记 `exhausted`，充值后需手动重新启用。'
         }
       ]
     },
@@ -314,6 +337,7 @@ https://search.604020.xyz/tavily          → 拼接 → https://search.604020.x
           rows: [
             ['`context7`', '不带 `Authorization` 头打 `GET /v3/search`（实测 200，与带 key 结构一致）', '`true`'],
             ['`keenable`', '改打 `POST /v1/search/public` 并带 `X-Keenable-Title: OneSearchRelay`；不发 `X-API-Key`', '`true`'],
+            ['`deepseek`', '照常发 `Authorization: Bearer `（空值），上游返回 401', '`false`'],
             ['其余七家', '照常发请求但不带凭据，上游返回 401（实测 exa / jina 如此），表现为 `auth` 失败', '`false`']
           ]
         },
@@ -372,6 +396,7 @@ https://search.604020.xyz/tavily          → 拼接 → https://search.604020.x
             ['firecrawl', '`GET api.firecrawl.dev/v2/team/credit-usage`', '团队剩余 credits 与计费周期', '1 分钟'],
             ['serper', '**无官方余额接口**', '用默认总额度 2500 credits 减本地累计 credits 估算，页面明确标注「非官方余额」', '**不自动刷新**'],
             ['brave', '`GET api.search.brave.com/res/v1/web/search?q=...&count=1`，解析响应头 `X-RateLimit-*`', '剩余请求数（取时长最长的那个窗口）', '**不自动刷新**'],
+            ['deepseek', '`GET api.deepseek.com/user/balance`（Bearer）', '账户可用余额与币种（CNY/USD，取 `balance_infos`）；`is_available=false` 时余额记 0', '1 分钟'],
             ['keenable', '**无官方额度接口**', '返回 `supported: false` 与「该渠道暂未配置官方额度查询」，不请求上游', '**不自动刷新**'],
             ['context7', '**无官方额度接口**', '返回 `supported: false` 与「该渠道暂未配置官方额度查询」，不请求上游（上游没有账户额度查询端点）', '**不自动刷新**']
           ]
@@ -380,7 +405,7 @@ https://search.604020.xyz/tavily          → 拼接 → https://search.604020.x
           type: 'callout',
           tone: 'warn',
           title: 'Brave 的额度查询会消耗一次真实请求',
-          text: '它是靠发起一次真实搜索并读取限流响应头来估算的，因此每次查询都会占用一次成功请求配额。Serper、Brave、Keenable 与 Context7 都不参与自动刷新，只能手动点「查询官方额度」。'
+          text: '它是靠发起一次真实搜索并读取限流响应头来估算的，因此每次查询都会占用一次成功请求配额。Serper、Brave、Keenable 与 Context7 都不参与自动刷新，只能手动点「查询官方额度」。DeepSeek 的 `/user/balance` 是免费只读查询，因此参与 1 分钟自动刷新。'
         },
         {
           type: 'callout',

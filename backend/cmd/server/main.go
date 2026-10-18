@@ -195,6 +195,13 @@ func buildProviderRegistry(cfg config.Config) (*provider.Registry, error) {
 		}
 		return provider.NewContext7Provider(providerCfg)
 	})
+	registry.RegisterFactory(model.ProviderDeepSeek, func(providerCfg provider.Config) provider.Provider {
+		providerCfg.UserAgent = cfg.UpstreamUserAgent
+		if providerCfg.Timeout == 0 {
+			providerCfg.Timeout = cfg.RequestTimeout
+		}
+		return provider.NewDeepSeekProvider(providerCfg)
+	})
 	return registry, nil
 }
 

@@ -213,7 +213,8 @@ export const consoleChapter: DocChapter = {
           items: [
             '左图按渠道汇总 USD 成本画柱状图；右表逐渠道列出 `单位 · 数量` 与对应 USD，末行是「合计」，并明确标注「估算 USD，非官方账单」。',
             '只统计**成功调用**且单价大于 0 的行；没有可估算数据时显示「暂无可估算成本（仅成功调用 + 公开单价）」。',
-            '单价来源：渠道 settings 里的 `price_per_request` / `price_per_credit` / `price_per_token`，为 0 时回退后端内置公开价目表。要改单价去「平台管理 → 计费」Tab；这里不重复列出具体数字，避免与实际生效值漂移。'
+            '单价来源：渠道 settings 里的 `price_per_request` / `price_per_credit` / `price_per_token`，为 0 时回退后端内置公开价目表。要改单价去「平台管理 → 计费」Tab；这里不重复列出具体数字，避免与实际生效值漂移。',
+            'DeepSeek 官方以 CNY 计价，内置价目表按近似汇率折算为 USD；汇率波动时以渠道「计费」Tab 的覆盖值为准。'
           ]
         }
       ]
@@ -438,7 +439,7 @@ export const consoleChapter: DocChapter = {
           rows: [
             ['默认模式', '`default_mode`', '并发聚合（`parallel`）'],
             ['汇总返回结果数', '`default_limit`', '10（最小 1）'],
-            ['默认平台', '`default_providers`', '前八家通用搜索渠道（不含 `context7`）'],
+            ['默认平台', '`default_providers`', '9 个通用搜索渠道（含 deepseek，不含 `context7`）'],
             ['结果去重', '`default_dedupe`', '开'],
             ['平台路由策略', '`provider_routing_strategy`', '固定顺序（`fixed`）']
           ]

@@ -396,8 +396,8 @@ const (
 
 // resultOptions 是归一化结果时所需的输出开关与截断上限。
 //
-// 之所以做成值对象而不是继续往 normalize*Results 上加布尔参数：九个适配器共用同一套口径，
-// 每加一个开关都要改九处签名，且调用点很难看出「这次到底开没开正文」。
+// 之所以做成值对象而不是继续往 normalize*Results 上加布尔参数：十个适配器共用同一套口径，
+// 每加一个开关都要改十处签名，且调用点很难看出「这次到底开没开正文」。
 type resultOptions struct {
 	IncludeRaw     bool // 是否填充 result.Raw（上游原始条目）
 	IncludeContent bool // 是否填充 result.Content（正文）

@@ -21,7 +21,7 @@ One Search 是自托管的 Web Search API 聚合网关：
 | `backend/cmd/server/main.go` | 全部装配：配置 → DB → 迁移 → 管理员 → 渠道注册表 → 编排器 → 路由 → 优雅退出 |
 | `backend/internal/api/` | chi 路由、中间件、`/v1`、`/api/admin`、MCP（JSON-RPC）、fetch 端点、鉴权与配额 |
 | `backend/internal/search/orchestrator.go` | 搜索主流程：默认值、路由、Key 重试、缓存、singleflight、去重、日志 |
-| `backend/internal/provider/` | 9 个上游适配器（exa/you/jina/tavily/firecrawl/serper/brave/keenable/context7）与注册表 |
+| `backend/internal/provider/` | 10 个上游适配器（exa/you/jina/tavily/firecrawl/serper/brave/keenable/context7/deepseek）与注册表 |
 | `backend/internal/keypool/` | Key 选择策略、权重、并发闸门、冷却与用量统计 |
 | `backend/internal/fetch/` | 抓取执行体：SSRF 护栏、HTML→Markdown、截断续读、缓存、Tavily 回退 |
 | `backend/internal/db/` | pgx 数据访问（`store.go`，手写 SQL）与迁移执行（`migrations.go`） |

@@ -166,7 +166,7 @@ curl "$BASE_URL/api/admin/dashboard" \
 | `GET` | `/api/admin/dashboard` | 可以 | 获取用量、Provider、Provider 健康度、30 天账单摘要。 |
 | `GET` | `/api/admin/providers` | 可以 | 获取 Provider 配置列表。 |
 | `GET` | `/api/admin/providers/health` | 可以 | 获取 Provider 健康状态。 |
-| `PATCH` | `/api/admin/providers/{name}` | 可以 | 更新 Provider 配置。`name` 为内置 Provider 名，例如 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`、`context7`。 |
+| `PATCH` | `/api/admin/providers/{name}` | 可以 | 更新 Provider 配置。`name` 为内置 Provider 名，例如 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`、`context7`、`deepseek`。 |
 | `GET` | `/api/admin/keys` | 可以 | 获取 Provider Key 列表，只返回脱敏信息。 |
 | `GET` | `/api/admin/keys/{id}/secret` | 可以 | 读取指定 Provider Key 的明文（含 Exa 团队密钥）。写 `provider_key.reveal` 审计。 |
 | `POST` | `/api/admin/keys` | 可以 | 创建 Provider Key。 |
@@ -391,6 +391,7 @@ curl -X POST "$BASE_URL/api/admin/keys" \
 | --- | --- | --- |
 | `context7` | `true` | 不带 `Authorization` 头请求 `GET /v3/search`（实测返回 200，与带 key 结构一致；而带无效 key 反而 401）。 |
 | `keenable` | `true` | 改打 `POST /v1/search/public` 并携带 `X-Keenable-Title: OneSearchRelay`（该头是应用标识而非凭据，取值写死、不可配置）；**不再发送 `X-API-Key`**，因为实测带空 `X-API-Key` 头与完全不带鉴权同样被上游判为 401。限流为 1000 次/小时、10 次/秒，**按 IP 且为共享池**，额度不受网关控制；匿名调用不消耗 credits。 |
+| `deepseek` | `false` | 照常发 `Authorization: Bearer `（空值），上游返回 401，表现为 `auth` 失败。 |
 | 其余七家 | `false` | 照常发请求但不带凭据，上游返回 401，表现为 `auth` 失败。 |
 
 `supports_anonymous_key` 由渠道列表接口 `GET /api/admin/providers`（以及同一实现下的 `GET /v1/providers`）下发。它**不是数据库列**，而是在 `ListProviders` 之后由 Handler 按 registry 现场填充；**仅用于管理台提示与创建时的确认框，不参与任何放行判断**。字段缺省或后端未填充时视为 `false`，即「未声明支持匿名」。注意 `GET /api/admin/dashboard` 的 `providers` 字段是数据库行的直接投影，**不含**该字段（那里也不用于渠道能力提示）。相关风险与限制见管理台的「渠道配置详解」文档章节。
@@ -442,10 +443,10 @@ curl -X POST "$BASE_URL/api/admin/keys" \
 
 | 字段 | 说明 |
 | --- | --- |
-| `provider_name` | 内置 Provider 名：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`、`context7`。 |
+| `provider_name` | 内置 Provider 名：`exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`、`context7`、`deepseek`。 |
 | `alias` | Key 别名。同一 Provider 下唯一。 |
 | `key` | 上游搜索 API Key，会加密存储。**允许留空**：空串（或纯空白）表示一条**匿名密钥**，即「无密钥调用」，详见下方「匿名密钥」。 |
-| `base_url` | 可选。该 Key 专属的基础 URL，留空则回退到该渠道（Provider）的 `base_url`。非空时必须是 `http://` 或 `https://` 开头的完整地址，否则返回 400。**覆盖值是整段替换根地址**：Brave 默认地址为 `https://api.search.brave.com/res/v1`，指向中转站时必须写成 `<host>/res/v1`，否则会 404；`context7` 默认地址为 `https://context7.com/api`（端点 `/v3/search` 由适配器拼接，不要写进 `base_url`）；其余渠道默认地址不含路径前缀。**以 `#` 开头表示该地址即完整端点**，网关不再拼接适配器自己的路径，例如 `#https://relay.example.com/proxy/tavily/search`；`#` 会被剥掉再校验，`#` 后仍需是合法的 http/https 绝对地址。Jina 的搜索词拼在 URL 路径中，保存带 `#` 的地址会返回 400。 |
+| `base_url` | 可选。该 Key 专属的基础 URL，留空则回退到该渠道（Provider）的 `base_url`。非空时必须是 `http://` 或 `https://` 开头的完整地址，否则返回 400。**覆盖值是整段替换根地址**：Brave 默认地址为 `https://api.search.brave.com/res/v1`，指向中转站时必须写成 `<host>/res/v1`，否则会 404；`context7` 默认地址为 `https://context7.com/api`（端点 `/v3/search` 由适配器拼接，不要写进 `base_url`）；`deepseek` 默认地址为 `https://api.deepseek.com`（端点 `/v1/tools/search` 由适配器拼接）；其余渠道默认地址不含路径前缀。**以 `#` 开头表示该地址即完整端点**，网关不再拼接适配器自己的路径，例如 `#https://relay.example.com/proxy/tavily/search`；`#` 会被剥掉再校验，`#` 后仍需是合法的 http/https 绝对地址。Jina 的搜索词拼在 URL 路径中，保存带 `#` 的地址会返回 400。 |
 | `proxy_mode` | 可选。该 Key 的代理模式，取值 `inherit`（默认，跟随渠道级代理）、`direct`（强制直连，忽略渠道级代理）、`custom`（使用该 Key 自己的 `proxy_url`）。缺省或非法值按 `inherit` 处理。 |
 | `proxy_url` | 可选。仅 `custom` 模式生效的代理地址；地址为空时回退渠道级代理，而不是强制直连。未写协议头会自动补 `http://`，容器内会把 `127.0.0.1`/`localhost` 改写为 `host.docker.internal`。 |
 | `exa_api_key_id` | Exa 官方 usage 查询使用的 API Key ID。Exa 可选但建议填写。 |
@@ -551,8 +552,11 @@ curl -X POST "$BASE_URL/api/admin/keys/1/quota" \
 | `firecrawl` | `GET https://api.firecrawl.dev/v2/team/credit-usage` | 返回团队 remainingCredits/planCredits 和账期。 |
 | `serper` | 本地累计用量估算 | Serper 未公开独立余额接口；按默认总额度 2500 credits 减本地累计 credits 估算剩余额度，不额外请求上游。 |
 | `brave` | `GET https://api.search.brave.com/res/v1/web/search` | Brave 通过 `X-RateLimit-*` 响应头返回剩余请求额度；查询本身会消耗一次成功请求。 |
+| `deepseek` | `GET https://api.deepseek.com/user/balance` | 官方账户余额，返回 `is_available` 与 `balance_infos[]`（CNY/USD）；参与 1 分钟自动刷新，余额为 0 或 `is_available=false` 时密钥置 `exhausted`。 |
 | `keenable` | 无官方额度接口 | 返回 `supported: false` 与「该渠道暂未配置官方额度查询」，不请求上游，也不参与自动刷新。 |
 | `context7` | 无官方额度接口 | 返回 `supported: false` 与「该渠道暂未配置官方额度查询」，不请求上游（上游没有账户额度查询端点），也不参与自动刷新。 |
+
+DeepSeek Search 官方按 **每 1,000 次成功请求 5 元** 计费，只有 HTTP 200 且 `results` 非空的请求计费；失败、空结果与超时不计费，`count` 不影响价格。网关仪表盘的成本估算统一以 USD 展示，内置价目表按近似汇率折算为约 `$0.0007/次`；汇率或官方价格变化时，请在渠道「计费」Tab 覆盖 `price_per_request`。本次只接入 DeepSeek 的 Search 接口，`/v1/tools/fetch` 未接入网关的抓取链路。
 
 ### 5.8 创建外部 API Token
 
@@ -629,7 +633,7 @@ curl -X PATCH "$BASE_URL/api/admin/tokens/1" \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "client-a",
-    "allowed_providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable", "context7"],
+    "allowed_providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable", "context7", "deepseek"],
     "rate_limit_per_min": 120,
     "daily_quota": 2000,
     "monthly_quota": 60000
@@ -664,7 +668,7 @@ curl -X PUT "$BASE_URL/api/admin/settings" \
   -H 'Content-Type: application/json' \
   -d '{
     "default_mode": "parallel",
-    "default_providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable"],
+    "default_providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable", "deepseek"],
     "default_limit": 10,
     "default_dedupe": true,
     "request_timeout_ms": 20000,
@@ -686,7 +690,7 @@ curl -X PUT "$BASE_URL/api/admin/settings" \
 | 字段 | 说明 |
 | --- | --- |
 | `default_mode` | 默认搜索模式：`parallel`、`fallback`、`single`。 |
-| `default_providers` | 默认 Provider 列表；新库初始化和默认 fallback 为 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable` 八个通用搜索 Provider。**`context7` 是有意不放入默认列表的**：它是文档检索渠道，只应在显式传 `providers: ["context7"]` 时参与，因此升级到含 `context7` 的版本不会改变存量用户的默认搜索行为。需要让它参与默认路由时，把 `context7` 加进这个数组即可。 |
+| `default_providers` | 默认 Provider 列表；新库初始化为 `exa`、`you`、`jina`、`tavily`、`firecrawl`、`serper`、`brave`、`keenable`、`deepseek` 九个通用搜索 Provider。**`context7` 是有意不放入默认列表的**：它是文档检索渠道，只应在显式传 `providers: ["context7"]` 时参与，因此升级到含 `context7` 的版本不会改变存量用户的默认搜索行为。需要让它参与默认路由时，把 `context7` 加进这个数组即可。升级到含 `deepseek` 的版本时，只有当现有数组仍等于上一版 8 元数组才会自动追加，自定义过的实例保持原样。 |
 | `default_limit` | 默认返回结果数，搜索时最大限制为 50。 |
 | `default_dedupe` | 是否默认去重。 |
 | `request_timeout_ms` | 单次搜索总超时。 |
@@ -757,7 +761,7 @@ curl -X POST "$BASE_URL/v1/search" \
   -H 'Content-Type: application/json' \
   -d '{
     "query": "latest web search APIs",
-    "providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable", "context7"],
+    "providers": ["exa", "you", "jina", "tavily", "firecrawl", "serper", "brave", "keenable", "context7", "deepseek"],
     "mode": "parallel",
     "limit": 10,
     "cache": "default",
