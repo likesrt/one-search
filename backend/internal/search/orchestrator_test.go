@@ -125,6 +125,8 @@ type orchestratorTestProvider struct {
 	resultN    int
 	empty      bool
 	searchHook func()
+	// limitSink 用于断言编排层实际发给渠道的条数（显式 limit 与渠道缺省值的优先级）。
+	limitSink *int
 }
 
 func (p orchestratorTestProvider) Name() string {
@@ -132,6 +134,9 @@ func (p orchestratorTestProvider) Name() string {
 }
 
 func (p orchestratorTestProvider) Search(ctx context.Context, req model.SearchRequest, key model.APIKey) (model.ProviderResponse, error) {
+	if p.limitSink != nil {
+		*p.limitSink = req.Limit
+	}
 	if p.searchHook != nil {
 		p.searchHook()
 	}
@@ -472,6 +477,69 @@ func TestProviderResultLimitsDoNotCapAtFifty(t *testing.T) {
 	})
 	if got, want := limits[model.ProviderExa], 120; got != want {
 		t.Fatalf("provider limit = %d, want %d", got, want)
+	}
+}
+
+// TestExplicitLimitOverridesProviderDefault 覆盖「显式 limit 优先」这一语义。
+//
+// 渠道级 request_result_limit 只作为缺省值，调用方显式传 limit 时必须原样下发，
+// 否则调用方会拿到比请求更少的结果却查不出原因（用户实测 limit:30 只回 10 条即此问题）。
+// 参数 t 为测试上下文；无返回值，断言失败时直接终止用例。成功后通过 limitSink 校验下发值。
+func TestExplicitLimitOverridesProviderDefault(t *testing.T) {
+	var gotLimit int
+	store := &orchestratorTestStore{
+		settings: model.RuntimeSettings{
+			DefaultMode: model.SearchModeSingle, DefaultProviders: []string{model.ProviderSerper},
+			DefaultLimit: 10, DefaultDedupe: true, RequestTimeoutMS: 2000, CacheEnabled: false,
+		},
+		providers: []model.ProviderConfig{{
+			Name: model.ProviderSerper, Enabled: true, Priority: 1, Weight: 1,
+			Settings: map[string]interface{}{"request_result_limit": 10},
+		}},
+	}
+	searcher := orchestratorTestProvider{name: model.ProviderSerper, resultN: 30, limitSink: &gotLimit}
+	orchestrator := NewOrchestrator(provider.NewRegistry(searcher), &orchestratorTestKeyPool{}, store)
+
+	req := model.SearchRequest{
+		Query: "红甜菜 在哪里采摘", Providers: []string{model.ProviderSerper}, ProvidersExplicit: true,
+		Mode: model.SearchModeSingle, Limit: 30, LimitExplicit: true,
+	}
+	if _, err := orchestrator.Search(context.Background(), req, "request-id", 0); err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if gotLimit != 30 {
+		t.Fatalf("provider got limit %d, want 30（显式 limit 不应被渠道缺省值覆盖）", gotLimit)
+	}
+}
+
+// TestProviderDefaultLimitAppliesWhenLimitOmitted 覆盖「渠道缺省值仍生效」这一语义。
+//
+// 调用方没有显式传 limit 时，渠道级 request_result_limit 应作为该渠道的缺省条数；
+// 否则去掉覆盖逻辑会顺带丢掉渠道配置的默认条数。参数 t 为测试上下文，无返回值。
+func TestProviderDefaultLimitAppliesWhenLimitOmitted(t *testing.T) {
+	var gotLimit int
+	store := &orchestratorTestStore{
+		settings: model.RuntimeSettings{
+			DefaultMode: model.SearchModeSingle, DefaultProviders: []string{model.ProviderSerper},
+			DefaultLimit: 10, DefaultDedupe: true, RequestTimeoutMS: 2000, CacheEnabled: false,
+		},
+		providers: []model.ProviderConfig{{
+			Name: model.ProviderSerper, Enabled: true, Priority: 1, Weight: 1,
+			Settings: map[string]interface{}{"request_result_limit": 25},
+		}},
+	}
+	searcher := orchestratorTestProvider{name: model.ProviderSerper, resultN: 30, limitSink: &gotLimit}
+	orchestrator := NewOrchestrator(provider.NewRegistry(searcher), &orchestratorTestKeyPool{}, store)
+
+	req := model.SearchRequest{
+		Query: "golang", Providers: []string{model.ProviderSerper}, ProvidersExplicit: true,
+		Mode: model.SearchModeSingle, Limit: 0, LimitExplicit: false,
+	}
+	if _, err := orchestrator.Search(context.Background(), req, "request-id", 0); err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if gotLimit != 25 {
+		t.Fatalf("provider got limit %d, want 25（未显式传 limit 时用渠道缺省值）", gotLimit)
 	}
 }
 

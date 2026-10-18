@@ -65,6 +65,17 @@ func NewOrchestrator(registry *provider.Registry, keyPool KeyPool, store Store) 
 	return &Orchestrator{registry: registry, keyPool: keyPool, store: store, quotaRefreshes: map[int64]quotaRefreshState{}}
 }
 
+// Search 执行一次检索：加载运行时配置、补齐默认值并路由渠道，再经缓存与单飞后调用渠道。
+//
+// 参数：req 为调用方请求，其中 LimitExplicit 标记 limit 是否由调用方显式指定；
+// requestID 用于响应元数据与检索日志；apiTokenID 记入检索日志，0 表示管理端或内部调用。
+//
+// 返回值：归一化后的检索响应；配置读取、缓存读写失败或渠道执行出错时返回相应错误。
+//
+// 边界条件：未显式传 limit 且只选中一个渠道时，渠道的 request_result_limit 作为缺省条数；
+// 显式 limit 不会被渠道配置覆盖（仅受各适配器自身上限夹紧）。
+//
+// 副作用：读写检索缓存，并写入检索日志（用独立 context，避免请求取消时丢日志）。
 func (o *Orchestrator) Search(ctx context.Context, req model.SearchRequest, requestID string, apiTokenID int64) (model.SearchResponse, error) {
 	started := time.Now()
 	settings, err := o.store.RuntimeSettings(ctx)
@@ -87,6 +98,8 @@ func (o *Orchestrator) Search(ctx context.Context, req model.SearchRequest, requ
 	providerTimeouts := providerTimeouts(providerSettings)
 	providerProxies := providerProxies(providerSettings)
 	providerRetryableErrors := providerRetryableErrors(providerSettings)
+	// 只在未显式传 limit 且只选中一个渠道时，用该渠道的 request_result_limit 作缺省条数。
+	// 显式 limit 一律以调用方为准，避免条数被渠道配置静默改小（见 callProvider 的说明）。
 	if !req.LimitExplicit && len(req.Providers) == 1 {
 		if limit := providerLimits[req.Providers[0]]; limit > 0 {
 			req.Limit = limit
@@ -379,8 +392,14 @@ func (o *Orchestrator) callProvider(ctx context.Context, req model.SearchRequest
 		return execution
 	}
 	providerReq := req
-	if limit := providerLimits[providerName]; limit > 0 {
-		providerReq.Limit = limit
+	if !req.LimitExplicit {
+		// 渠道级「请求结果数」只是缺省值：调用方显式传了 limit 就按调用方的走
+		// （仍受各适配器自己的上限夹紧）。原因：显式 limit 是调用方对「要几条」的直接表达，
+		// 被渠道配置静默压小会让调用方拿到比请求更少的结果却查不出原因；需要封顶时
+		// 应当配渠道的 request_result_limit 而不传 limit，或用 API Token 的配额字段限制成本。
+		if limit := providerLimits[providerName]; limit > 0 {
+			providerReq.Limit = limit
+		}
 	}
 	retryCount, ok := keyRetryCounts[providerName]
 	if !ok {
