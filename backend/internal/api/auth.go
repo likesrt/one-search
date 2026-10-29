@@ -145,11 +145,29 @@ func (a *AuthService) requireAdmin(next http.Handler) http.Handler {
 	})
 }
 
+// requireAPIToken 校验对外接口的 API Token（原生 /v1 接口使用）。
 func (a *AuthService) requireAPIToken(next http.Handler) http.Handler {
+	return a.requireAPITokenWith(next, writeError)
+}
+
+// requireAPITokenDeepSeek 的判定与 requireAPIToken 完全相同，
+// 只把失败响应换成 DeepSeek/OpenAI 兼容错误对象，供 /v1/tools/* 使用。
+//
+// 单独一个入口而不是在路由上再包一层改写：错误在中间件里直接写出，
+// 外层无法在不缓冲响应的前提下改写状态码与响应体。
+func (a *AuthService) requireAPITokenDeepSeek(next http.Handler) http.Handler {
+	return a.requireAPITokenWith(next, writeDeepSeekErrorForStatus)
+}
+
+// requireAPITokenWith 是令牌鉴权的共用实现。
+//
+// writeFailure 决定失败响应的形状：原生接口用网关的 {message,status}，
+// 兼容接口用 OpenAI 的 {message,type,param,code}。判定逻辑只此一份，避免两套口径漂移。
+func (a *AuthService) requireAPITokenWith(next http.Handler, writeFailure func(http.ResponseWriter, int, string)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		settings, err := a.store.RuntimeSettings(r.Context())
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeFailure(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if !settings.APIAuthRequired {
@@ -158,12 +176,12 @@ func (a *AuthService) requireAPIToken(next http.Handler) http.Handler {
 		}
 		token := bearerToken(r)
 		if token == "" {
-			writeError(w, http.StatusUnauthorized, "api token required")
+			writeFailure(w, http.StatusUnauthorized, "api token required")
 			return
 		}
 		adminKey, ok, err := a.store.FindAdminAPIKey(r.Context(), token)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeFailure(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if ok {
@@ -173,11 +191,11 @@ func (a *AuthService) requireAPIToken(next http.Handler) http.Handler {
 		}
 		apiToken, err := a.store.FindAPIToken(r.Context(), token)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "invalid api token")
+			writeFailure(w, http.StatusUnauthorized, "invalid api token")
 			return
 		}
 		if !a.allowToken(apiToken) {
-			writeError(w, http.StatusTooManyRequests, "api token rate limit exceeded")
+			writeFailure(w, http.StatusTooManyRequests, "api token rate limit exceeded")
 			return
 		}
 		ctx := context.WithValue(r.Context(), apiTokenIDKey, apiToken.ID)

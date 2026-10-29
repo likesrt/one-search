@@ -30,7 +30,7 @@ export const quickstartChapter: DocChapter = {
           rows: [
             ['原生搜索', '`POST /v1/search`', '字段最全（`mode`/`limit`/`freshness`/`dedupe`/`rerank`/`cache`/`include_raw`/`options`），新接入优先用它'],
             ['网页抓取', '`GET|POST /v1/fetch`', '抓取指定 URL 的正文，HTML 转紧凑 Markdown 并按字符数截断，可续读；与搜索链路独立'],
-            ['兼容接口', '`POST /v1/compat/tavily/search`、`/v1/compat/serper/search`、`/v1/compat/openai/responses-search`', '让已在用 Tavily / Serper / OpenAI 形态的客户端少改代码即可切过来'],
+            ['兼容接口', '`POST /v1/compat/tavily/search`、`/v1/compat/serper/search`、`/v1/compat/openai/responses-search`、`/v1/tools/search`、`/v1/tools/fetch`', '让已在用 Tavily / Serper / OpenAI / DeepSeek 形态的客户端少改代码即可切过来'],
             ['MCP', '`POST /mcp`（默认路径，可用 `MCP_PATH` 改）', '给 MCP 客户端（Codex / Claude Desktop / Cursor / LobeHub 等）暴露 `search` 与 `fetch` 两个工具']
           ]
         },
@@ -92,7 +92,7 @@ export const quickstartChapter: DocChapter = {
             },
             {
               title: '按需限制「允许请求渠道」',
-              text: '不选择表示全部渠道。选择后，调用方请求未授权的渠道会直接得到 403。注意：该限制**只对 `/v1/search` 与 MCP 生效，三个兼容端点不受它约束**，详见「兼容接口」与「凭据与配额」章节。'
+              text: '不选择表示全部渠道。选择后，调用方请求未授权的渠道会直接得到 403。注意：该限制**对 `/v1/search`、MCP 与 DeepSeek 兼容端点生效；Tavily / Serper / OpenAI 三个兼容端点不受它约束**，详见「兼容接口」与「凭据与配额」章节。'
             },
             {
               title: '复制明文令牌',

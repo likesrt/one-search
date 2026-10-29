@@ -173,6 +173,7 @@ func (s *Store) RuntimeSettings(ctx context.Context) (model.RuntimeSettings, err
 		CompatTavilyEnabled:         true,
 		CompatSerperEnabled:         true,
 		CompatOpenAIEnabled:         true,
+		CompatDeepSeekEnabled:       true,
 		APIAuthRequired:             true,
 		ProviderHealthWindowMinutes: 15,
 		ProviderRoutingStrategy:     "fixed",

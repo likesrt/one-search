@@ -29,7 +29,7 @@ export const authQuotaChapter: DocChapter = {
           type: 'table',
           columns: ['前缀', '来源', '可用于', '受限维度'],
           rows: [
-            ['`osr_`', '「接口令牌」页创建', '`/v1/search`、三个兼容端点、MCP `tools/call`、`/v1/providers`、`/v1/usage/summary`', 'RPM、日/月额度、`allowed_providers`（**仅原生搜索与 MCP 生效**）'],
+            ['`osr_`', '「接口令牌」页创建', '`/v1/search`、四个兼容端点、MCP `tools/call`、`/v1/providers`、`/v1/usage/summary`', 'RPM、日/月额度、`allowed_providers`（**仅原生搜索、MCP 与 DeepSeek 兼容端点生效**）'],
             ['`oak_`', '「系统设置 → 安全」生成', '上述全部入口，以及所有 `/api/admin/*` 管理接口', '不受令牌额度、RPM 与 `allowed_providers` 约束'],
             ['`adm_`', '管理台登录成功后签发', '仅 `/api/admin/*`', '内存会话，默认 24 小时过期；重启服务即失效']
           ]
@@ -69,8 +69,8 @@ export const authQuotaChapter: DocChapter = {
         {
           type: 'callout',
           tone: 'danger',
-          title: '只对 `/v1/search` 与 MCP 生效',
-          text: '调用 `applyTokenProviders` 的只有两处：原生搜索处理器与 MCP 的 `tools/call`。三个兼容端点（`/v1/compat/tavily/search`、`/v1/compat/serper/search`、`/v1/compat/openai/responses-search`）**完全没有等价逻辑**，白名单对它们不起作用。这是当前实现的既有缺口：只做「如实记录」，未做收敛。需要渠道级权限控制时，请只开放原生接口与 MCP。'
+          title: '原生 / MCP / DeepSeek 兼容端点生效',
+          text: '调用 `applyTokenProviders` 的是原生搜索处理器、MCP 的 `tools/call` 与 DeepSeek 兼容端点（`/v1/tools/search`）。Tavily / Serper / OpenAI 三个兼容端点（`/v1/compat/tavily/search`、`/v1/compat/serper/search`、`/v1/compat/openai/responses-search`）**完全没有等价逻辑**，白名单对它们不起作用。这是当前实现的既有缺口：只做「如实记录」，未做收敛。需要渠道级权限控制时，请只开放原生接口、MCP 或 DeepSeek 兼容端点。'
         }
       ]
     },

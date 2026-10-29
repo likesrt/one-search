@@ -44,10 +44,11 @@ const (
 type CompatFormat string
 
 const (
-	CompatFormatNative CompatFormat = "native"
-	CompatFormatTavily CompatFormat = "tavily"
-	CompatFormatSerper CompatFormat = "serper"
-	CompatFormatOpenAI CompatFormat = "openai"
+	CompatFormatNative   CompatFormat = "native"
+	CompatFormatTavily   CompatFormat = "tavily"
+	CompatFormatSerper   CompatFormat = "serper"
+	CompatFormatOpenAI   CompatFormat = "openai"
+	CompatFormatDeepSeek CompatFormat = "deepseek"
 )
 
 type SearchRequest struct {
@@ -188,6 +189,7 @@ type RuntimeSettings struct {
 	CompatTavilyEnabled         bool       `json:"compat_tavily_enabled"`
 	CompatSerperEnabled         bool       `json:"compat_serper_enabled"`
 	CompatOpenAIEnabled         bool       `json:"compat_openai_enabled"`
+	CompatDeepSeekEnabled       bool       `json:"compat_deepseek_enabled"`
 	APIAuthRequired             bool       `json:"api_auth_required"`
 	ProviderHealthWindowMinutes int        `json:"provider_health_window_minutes"`
 	ProviderRoutingStrategy     string     `json:"provider_routing_strategy"`

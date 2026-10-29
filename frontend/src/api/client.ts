@@ -230,6 +230,8 @@ export interface RuntimeSettings {
   compat_tavily_enabled: boolean
   compat_serper_enabled: boolean
   compat_openai_enabled: boolean
+  /** DeepSeek 官方 Search/Fetch 兼容端点（/v1/tools/search、/v1/tools/fetch）的开关 */
+  compat_deepseek_enabled: boolean
   api_auth_required: boolean
   provider_health_window_minutes: number
   provider_routing_strategy: string

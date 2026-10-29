@@ -190,6 +190,10 @@ func (h *Handler) mountV1Routes(r chi.Router) {
 		r.With(h.auth.requireAPIToken).Post("/compat/tavily/search", h.tavilySearch)
 		r.With(h.auth.requireAPIToken).Post("/compat/serper/search", h.serperSearch)
 		r.With(h.auth.requireAPIToken).Post("/compat/openai/responses-search", h.openAISearch)
+		// DeepSeek 官方客户端的路径是 /v1/tools/search 与 /v1/tools/fetch，
+		// 与上面几个兼容端点前缀不同，单独挂载以保持路径逐字一致。
+		r.With(h.auth.requireAPITokenDeepSeek).Post("/tools/search", h.deepSeekSearch)
+		r.With(h.auth.requireAPITokenDeepSeek).Post("/tools/fetch", h.deepSeekFetch)
 		r.With(h.auth.requireAPIToken).Get("/providers", h.providers)
 		r.With(h.auth.requireAPIToken).Get("/usage/summary", h.usageSummary)
 	})

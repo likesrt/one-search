@@ -245,7 +245,7 @@ export const faqChapter: DocChapter = {
           type: 'callout',
           tone: 'warn',
           title: '已知的两个既有缺口（本轮未修复）',
-          text: '① 令牌的 `allowed_providers` 对三个兼容端点不生效；② 令牌的 `scopes` 没有任何门控逻辑。两者都属于当前实现的既有行为，本页只做如实记录，未做收敛。需要渠道级权限控制时，请只开放 `/v1/search` 与 MCP。'
+          text: '① 令牌的 `allowed_providers` 对 Tavily / Serper / OpenAI 三个兼容端点不生效（DeepSeek 兼容端点会执行白名单）；② 令牌的 `scopes` 没有任何门控逻辑。两者都属于当前实现的既有行为，本页只做如实记录，未做收敛。需要渠道级权限控制时，请只开放 `/v1/search`、MCP 或 DeepSeek 兼容端点。'
         }
       ]
     }

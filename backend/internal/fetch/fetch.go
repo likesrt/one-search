@@ -38,6 +38,12 @@ const (
 	// 取 50000 字符：足以覆盖长文与技术文档的完整正文（按中英混排约折合
 	// 1.5 万至 2.5 万 token），同时仍留有上限兜底。
 	maximumMaxLength = 50000
+	// MaximumMaxLength 是 maximumMaxLength 的导出别名，供对外兼容层复用。
+	//
+	// DeepSeek 的 fetch 接口没有长度参数，必须按本服务的硬上限返回整页；
+	// 兼容层若自带一份 50000 的副本，日后调整上界时会在运行期变成 400，
+	// 因此这里只暴露同一常量而不是复制数值。
+	MaximumMaxLength = maximumMaxLength
 	// defaultUserAgent 是默认 UA。沿用浏览器标识，因为不少站点会拒绝空 UA
 	// 或非浏览器 UA 的请求，用爬虫标识会被直接拦截。
 	defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +

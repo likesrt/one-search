@@ -484,7 +484,7 @@ export const consoleChapter: DocChapter = {
         { type: 'heading', text: '兼容接口', level: 4 },
         {
           type: 'paragraph',
-          text: '三个开关分别控制 Tavily、Serper、OpenAI 兼容端点是否可用，默认全部打开。关闭后访问对应路径返回 404 并附带「compatibility endpoint is disabled」，可用于在不删除调用方配置的前提下临时下线其中一个入口。'
+          text: '四个开关分别控制 Tavily、Serper、OpenAI、DeepSeek 兼容端点是否可用，默认全部打开。关闭后访问对应路径返回 404 并附带「compatibility endpoint is disabled」，可用于在不删除调用方配置的前提下临时下线其中一个入口。'
         }
       ]
     }

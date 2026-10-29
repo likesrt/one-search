@@ -207,6 +207,8 @@ curl "$BASE_URL/api/admin/dashboard" \
 | `POST` | `/v1/compat/tavily/search` | 可以 | Tavily-like 兼容搜索接口。 |
 | `POST` | `/v1/compat/serper/search` | 可以 | Serper-like 兼容搜索接口。 |
 | `POST` | `/v1/compat/openai/responses-search` | 可以 | OpenAI-like 兼容搜索接口。 |
+| `POST` | `/v1/tools/search` | 可以 | DeepSeek 官方 Search 兼容接口。 |
+| `POST` | `/v1/tools/fetch` | 可以 | DeepSeek 官方 Fetch 兼容接口。 |
 | `GET` | `/v1/providers` | 可以 | 获取 Provider 配置列表。 |
 | `GET` | `/v1/usage/summary` | 可以 | 获取用量汇总。 |
 
@@ -678,6 +680,7 @@ curl -X PUT "$BASE_URL/api/admin/settings" \
     "compat_tavily_enabled": true,
     "compat_serper_enabled": true,
     "compat_openai_enabled": true,
+    "compat_deepseek_enabled": true,
     "api_auth_required": true,
     "provider_health_window_minutes": 15,
     "provider_routing_strategy": "fixed",
@@ -700,6 +703,7 @@ curl -X PUT "$BASE_URL/api/admin/settings" \
 | `compat_tavily_enabled` | 是否启用 Tavily-like 兼容接口。 |
 | `compat_serper_enabled` | 是否启用 Serper-like 兼容接口。 |
 | `compat_openai_enabled` | 是否启用 OpenAI-like 兼容接口。 |
+| `compat_deepseek_enabled` | 是否启用 DeepSeek 官方 Search/Fetch 兼容接口（`/v1/tools/search`、`/v1/tools/fetch`）。 |
 | `api_auth_required` | `/v1/*` 是否需要 API Token 或管理员 API Key。 |
 | `provider_health_window_minutes` | Provider 健康统计窗口。 |
 | `provider_routing_strategy` | Provider 级路由策略：`fixed`、`priority`、`weighted`、`weighted_random`、`available_keys`、`random`。 |
@@ -819,7 +823,45 @@ curl -X POST "$BASE_URL/v1/compat/openai/responses-search" \
   }'
 ```
 
-### 6.5 查看 `/v1` Provider 和用量
+### 6.5 DeepSeek 官方兼容
+
+DeepSeek 官方客户端把 Base URL 指向本服务后，即可直接使用其 `POST /v1/tools/search` 与 `POST /v1/tools/fetch` 契约。请求与响应字段与官方一致，官方未定义的 `providers` / `mode` / `cache` 是本服务附加的可选扩展字段。
+
+```bash
+curl -X POST "$BASE_URL/v1/tools/search" \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "DeepSeek V4 模型 发布",
+    "count": 5,
+    "ori_question": "DeepSeek 最近发布了什么",
+    "need_content": false
+  }'
+
+curl -X POST "$BASE_URL/v1/tools/fetch" \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/article"}'
+```
+
+Search 请求字段：`query`（必填，1～128 字符）、`count`（1～50，缺省 10）、`ori_question`（可选）、`localization`（可选）、`need_content`（缺省 false）。
+Search 响应顶层只有 `results`，每条结果含 `rerank_score`（0～3）、`title`、`url`、`snippet`、`summary`、`content`、`site_name`、`site_icon`、`date`、`authority`；本服务不采集的 `site_name` / `site_icon` 固定为 `null`，`authority` 固定为 `-1`。本服务没有官方的独立长摘要数据源：`need_content=true` 时 `summary` 复用 `content`，否则回退到 `snippet`。
+Fetch 响应为 `{"title":"","content":"Markdown 正文"}`；本服务不采集页面标题，`title` 恒为空字符串。
+
+DeepSeek 兼容端点的错误响应为 OpenAI 兼容格式：
+
+```json
+{
+  "error": {
+    "message": "'count' must be between 1 and 50",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": null
+  }
+}
+```
+
+### 6.6 查看 `/v1` Provider 和用量
 
 ```bash
 curl "$BASE_URL/v1/providers" \
@@ -842,6 +884,8 @@ curl "$BASE_URL/v1/usage/summary" \
 }
 ```
 
+> 例外：DeepSeek 兼容端点（`/v1/tools/search`、`/v1/tools/fetch`）按官方契约输出 OpenAI 兼容错误对象 `{"error":{"message","type","param","code"}}`，不包含 `status` 字段。
+
 常见状态码：
 
 | 状态码 | 场景 |
@@ -851,8 +895,10 @@ curl "$BASE_URL/v1/usage/summary" \
 | `403` | 普通 API Token 请求了未授权 Provider。管理员 API Key 不受此限制。 |
 | `404` | 兼容接口被禁用时返回；或反向代理未命中路径；或读取明文时目标不存在（管理员 API Key 未生成、Token 不存在）。 |
 | `409` | 读取 Token 明文时该令牌的明文未留存（创建于密文列引入之前），需重建令牌。 |
+| `413` | 请求体超过全局大小上限（DeepSeek 兼容端点按官方契约返回 413）。 |
 | `429` | 管理员登录失败次数过多，或普通 API Token 触发 RPM 限制。 |
 | `502` | Provider Key 测试或官方额度查询时上游失败。 |
+| `504` | DeepSeek 兼容抓取的下游请求超时。 |
 | `500` | 数据库、配置、加解密或内部服务错误。 |
 
 ## 8. 审计行为

@@ -209,6 +209,13 @@
             </div>
             <el-switch v-model="settings.compat_openai_enabled" />
           </div>
+          <div class="compat-item">
+            <div>
+              <strong>DeepSeek</strong>
+              <span>/v1/tools/search · /v1/tools/fetch</span>
+            </div>
+            <el-switch v-model="settings.compat_deepseek_enabled" />
+          </div>
         </div>
       </section>
 
@@ -499,7 +506,7 @@ onMounted(load)
 .admin-key-alert { margin-top: 12px; }
 .compat-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
 }
 .compat-item {

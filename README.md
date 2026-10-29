@@ -74,6 +74,8 @@ curl -X POST http://localhost:5173/v1/search \
 | `/v1/compat/tavily/search` | Tavily 兼容 |
 | `/v1/compat/serper/search` | Serper 兼容 |
 | `/v1/compat/openai/responses-search` | OpenAI 兼容 |
+| `/v1/tools/search` | DeepSeek 官方 Search 兼容 |
+| `/v1/tools/fetch` | DeepSeek 官方 Fetch 兼容 |
 | `/mcp` | MCP（默认开启） |
 
 完整接口见 [docs/admin-api-key.md](docs/admin-api-key.md)、[docs/mcp.md](docs/mcp.md)。
