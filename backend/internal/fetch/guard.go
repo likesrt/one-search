@@ -1,6 +1,7 @@
 package fetch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -38,6 +39,8 @@ var ErrPrivateTarget = errors.New("已拦截内网地址")
 //   - trustedProxyIPs：管理员配置的代理主机 IP 集合，命中即放行。
 //     代理地址由管理员配置、视为可信，因此放行；这样「用本地代理」就不再需要关掉整个
 //     SSRF 防护（源工具把两者绑在同一个开关上，是有意改进的点）。
+//     该名单是构造期快照，可能为空或过期（容器重建换 IP、DNS 未就绪），因此它只是
+//     proxyDialer 的兜底；代理拨号的主路径是比对配置里的主机名，不依赖本名单。
 //     只比对 IP 不比对端口：同 IP 不同端口仍属管理员自己的代理主机，端口还可能因默认值
 //     变化，比对端口会造成误拦。
 //
@@ -65,6 +68,88 @@ func newGuardDialer(allowPrivate bool, trustedProxyIPs map[string]bool) *net.Dia
 			return fmt.Errorf("%w %s", ErrPrivateTarget, host)
 		},
 	}
+}
+
+// proxyDialer 把「代理主机放行」与拨号护栏组合在一起。
+//
+// 为什么不能只靠构造期的 IP 白名单：代理常写成容器名或域名（如 http://resin:2260），
+// 其 IP 由 Docker DNS 在运行期决定 —— 容器重建会换 IP，启动初期还可能解析失败。
+// resolveProxyIPs 抓到的只是那一刻的快照，快照一旦为空或过期，代理本身就会被
+// 拨号护栏当成内网目标拦下（报错：proxyconnect tcp: dial tcp <私网IP>: 已拦截内网地址）。
+// 这里改为在每次拨号时比对 Transport 传入的「主机名:端口」，命中就用不带护栏的
+// 拨号器连接 —— 代理是管理员配置的可信出口，它的 IP 属于私网并不构成 SSRF。
+//
+// 安全性：配置了代理的 Transport 只会拨代理本身（HTTP 代理与 SOCKS5 均如此），
+// 目标侧的内网拦截由 checkTargetLiteral 负责，这条路径不接触任何目标地址。
+type proxyDialer struct {
+	// guarded 是带 SSRF 护栏的拨号器，处理所有非代理拨号
+	guarded *net.Dialer
+	// direct 用于连接代理本身：地址来自管理员配置，不再做内网判定
+	direct *net.Dialer
+	// host 与 port 是配置里的代理地址，port 已按 scheme 补全默认值
+	host string
+	port string
+}
+
+// newProxyDialer 构造代理感知的拨号器。
+//
+// 参数 trustedProxyIPs 仅作为兜底名单：正常情况下拨号地址的主机名与配置一致，
+// 不依赖该名单；保留它是为了覆盖 Transport 以 IP 形式传入代理地址的情形。
+func newProxyDialer(allowPrivate bool, proxyURL *url.URL, trustedProxyIPs map[string]bool) *proxyDialer {
+	return &proxyDialer{
+		guarded: newGuardDialer(allowPrivate, trustedProxyIPs),
+		direct:  &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second},
+		host:    proxyURL.Hostname(),
+		port:    proxyPort(proxyURL),
+	}
+}
+
+// proxyPort 返回代理连接实际使用的端口。
+//
+// 配置里未写端口时按 scheme 的默认端口补全，与 http.Transport 的 canonicalAddr
+// 口径一致；否则「未写端口的代理永远匹配不上拨号地址」会被误拦。
+func proxyPort(proxyURL *url.URL) string {
+	if port := proxyURL.Port(); port != "" {
+		return port
+	}
+	switch proxyURL.Scheme {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	case "socks5", "socks5h":
+		return "1080"
+	}
+	return ""
+}
+
+// Dial 满足 proxy.Dialer 接口，供 x/net/proxy 的 SOCKS5 适配器调用。
+func (d *proxyDialer) Dial(network, address string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, address)
+}
+
+// DialContext 在拨号前判断本次连接是否指向管理员配置的代理。
+//
+// 命中时使用不带护栏的拨号器；否则交回护栏判定，内网目标仍会被拦截。
+func (d *proxyDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if d.isProxyAddress(address) {
+		return d.direct.DialContext(ctx, network, address)
+	}
+	return d.guarded.DialContext(ctx, network, address)
+}
+
+// isProxyAddress 判断拨号目标是否就是配置里的代理地址。
+//
+// 只比较主机名（大小写不敏感）与端口。端口在 newProxyDialer 里已按 scheme 补全默认值，
+// 因此「配置未写端口」也能与 Transport 拨号时的 host:port 对上。
+//
+// 边界条件：地址无法拆出 host:port 时返回 false，交回护栏判定（宁可失败也不放行）。
+func (d *proxyDialer) isProxyAddress(address string) bool {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(host, d.host) && port == d.port
 }
 
 // isPrivateIP 判断 IP 是否属于不应被外部调用方触达的地址段。
@@ -137,12 +222,12 @@ func parseProxyURL(raw string) (*url.URL, error) {
 
 // resolveProxyIPs 解析代理主机名，返回其全部 IP 的字符串集合。
 //
-// 域名形式的代理（如容器内的 host.docker.internal）只在这里解析一次，
-// 结果作为拨号层的放行名单。
+// 这是一个构造期快照，在 proxyDialer 按主机名放行之后只充当兜底（见 newProxyDialer）。
+// 容器环境下快照可能很快过期，因此代理可用性不应依赖它。
 //
-// 边界条件：解析失败时返回空集合而非报错 —— 调用方按「裸名单」继续运行，
-// 结果是所有私网地址（含该代理）都被拦截，表现为抓取失败而不是静默绕过。
-// 这是有意的：宁可抓取失败，也不能放开一个不确定的放行名单。
+// 边界条件：解析失败时返回空集合而非报错。由于 proxyDialer 会先按配置里的主机名
+// 放行代理，空集合不会再把代理本身拦下，只会让「Transport 以 IP 形式传入代理地址」
+// 这条兜底路径失效；真正的目标拨号仍由 newGuardDialer 按解析后的 IP 判定。
 //
 // 副作用：可能触发一次 DNS 查询；失败时写一行日志。
 func resolveProxyIPs(proxyURL *url.URL) map[string]bool {
@@ -154,7 +239,7 @@ func resolveProxyIPs(proxyURL *url.URL) map[string]bool {
 	}
 	ips, err := net.LookupIP(host)
 	if err != nil {
-		log.Printf("fetch: 代理主机 %q 解析失败，拨号放行名单为空: %v", host, err)
+		log.Printf("fetch: 代理主机 %q 解析失败（仅影响 IP 兜底名单，代理仍按主机名放行）: %v", host, err)
 		return allowed
 	}
 	for _, ip := range ips {
@@ -169,9 +254,10 @@ func resolveProxyIPs(proxyURL *url.URL) map[string]bool {
 //   - socks5/socks5h 经 x/net/proxy 适配为拨号器，由它负责与代理握手；
 //   - http/https 交给标准库的 Transport.Proxy 处理。
 //
-// 两种情况下底层拨号器都替换为带护栏的实现：HTTP 代理下护栏会放行代理主机自身
-// （在放行名单里），但仍拦截非代理目标；SOCKS5 下护栏实际只作用于「连到代理」这一步，
-// 目标侧的字面量兜底检查由 checkTargetLiteral 承担。
+// 两种情况下底层拨号器都替换为 proxyDialer：拨号目标是配置里的代理主机名时直接放行
+// （代理是管理员配置的可信出口，其 IP 是不是私网不影响判定），其余拨号仍走护栏。
+// SOCKS5 下护栏实际只作用于「连到代理」这一步，目标侧的字面量兜底检查由
+// checkTargetLiteral 承担。
 //
 // 返回值 error 表示该代理不可用（缺少主机名或 SOCKS5 适配失败），
 // 调用方应退回直连并记日志。
@@ -181,7 +267,7 @@ func applyProxyTransport(transport *http.Transport, proxyURL *url.URL, allowPriv
 	if proxyURL.Hostname() == "" {
 		return errors.New("代理地址缺少主机名")
 	}
-	dialer := newGuardDialer(allowPrivate, trustedProxyIPs)
+	dialer := newProxyDialer(allowPrivate, proxyURL, trustedProxyIPs)
 	switch proxyURL.Scheme {
 	case "socks5", "socks5h":
 		socksDialer, err := proxy.SOCKS5("tcp", proxyURL.Host, socksAuth(proxyURL), dialer)

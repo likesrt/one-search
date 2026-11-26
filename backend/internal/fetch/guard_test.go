@@ -2,7 +2,9 @@ package fetch
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -224,5 +226,84 @@ func TestSocksAuth(t *testing.T) {
 	withoutAuth, _ := url.Parse("socks5://127.0.0.1:1080")
 	if socksAuth(withoutAuth) != nil {
 		t.Fatal("无认证信息时应返回 nil")
+	}
+}
+
+// TestProxyDialerTrustsHostnameWithStaleAllowlist 复现线上故障：
+// 代理写成容器名/域名时，构造期的 IP 快照可能为空（DNS 未就绪）或过期（容器重建换了 IP），
+// 旧实现会把代理本身当成内网目标拦掉。修复后按主机名动态放行，抓取应正常完成。
+func TestProxyDialerTrustsHostnameWithStaleAllowlist(t *testing.T) {
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, "proxied-ok")
+	}))
+	defer proxyServer.Close()
+	_, port, err := net.SplitHostPort(proxyServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 带上认证信息，覆盖线上 http://user:pass@容器名:端口 的形态
+	proxyURL, err := url.Parse("http://user:pass@localhost:" + port)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &http.Transport{}
+	// 空名单模拟解析失败或过期快照
+	if err := applyProxyTransport(transport, proxyURL, false, map[string]bool{}); err != nil {
+		t.Fatalf("装配代理失败: %v", err)
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	resp, err := client.Get("http://93.184.216.34/")
+	if err != nil {
+		t.Fatalf("代理是域名且名单为空时不应被护栏拦下: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "proxied-ok" {
+		t.Fatalf("应拿到代理返回内容，实际 %q", body)
+	}
+}
+
+// TestProxyDialerKeepsPrivateTargetBlocked 确认放行代理没有连带放开其他私网目标。
+func TestProxyDialerKeepsPrivateTargetBlocked(t *testing.T) {
+	proxyURL, _ := url.Parse("http://resin:2260")
+	dialer := newProxyDialer(false, proxyURL, nil)
+	_, err := dialer.DialContext(context.Background(), "tcp", "10.1.2.3:443")
+	if !errors.Is(err, ErrPrivateTarget) {
+		t.Fatalf("非代理的私网目标应被拦截，实际: %v", err)
+	}
+}
+
+// TestIsProxyAddress 覆盖代理主机名比对的合法与非法形态。
+func TestIsProxyAddress(t *testing.T) {
+	withPort, _ := url.Parse("http://resin:2260")
+	dialer := newProxyDialer(false, withPort, nil)
+	cases := []struct {
+		address string
+		want    bool
+	}{
+		{"resin:2260", true},
+		{"RESIN:2260", true},
+		{"resin:2261", false},
+		{"other:2260", false},
+		{"resin", false},
+	}
+	for _, tc := range cases {
+		if got := dialer.isProxyAddress(tc.address); got != tc.want {
+			t.Fatalf("isProxyAddress(%q) = %v，期望 %v", tc.address, got, tc.want)
+		}
+	}
+
+	// 未写端口时按 scheme 默认端口补全
+	noPort, _ := url.Parse("http://resin")
+	defaultDialer := newProxyDialer(false, noPort, nil)
+	if !defaultDialer.isProxyAddress("resin:80") {
+		t.Fatal("http 代理未写端口时应匹配 80")
+	}
+	if defaultDialer.isProxyAddress("resin:8080") {
+		t.Fatal("http 代理未写端口时不应匹配其他端口")
 	}
 }

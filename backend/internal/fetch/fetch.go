@@ -263,7 +263,7 @@ func normalizeTimeout(value time.Duration) time.Duration {
 // buildClient 按代理构造 HTTP 客户端，proxy 为 nil 时返回直连客户端。
 //
 // 两种形态共用同一份拨号护栏：直连时护栏判定目标是内网则拦截；
-// 走代理时护栏放行代理主机自身的 IP（管理员配置的代理视为可信），
+// 走代理时按配置里的主机名放行代理本身（管理员配置的代理视为可信，IP 是否私网无关），
 // 目标侧的字面量兜底检查在 doRequest 里另行完成。
 //
 // MaxConnsPerHost 是必需的上限：默认值 0 表示不限制，一个客户端并发抓同一站点时
@@ -281,8 +281,8 @@ func (f *Fetcher) buildClient(proxy *url.URL) *http.Client {
 		transport.DialContext = newGuardDialer(f.allowPrivate, nil).DialContext
 		return newHTTPClient(transport, f.timeout)
 	}
-	// 代理域名解析失败时放行名单为空：此后所有私网地址（含该代理）都会被护栏拦截，
-	// 表现为抓取失败而不是静默绕过，符合「不放行不确定的地址」的策略。
+	// 代理主机按配置里的主机名动态放行（见 guard.go 的 proxyDialer），这份 IP 名单只是
+	// 兜底：解析失败或过期都不再影响代理本身可用，也不会因此放开任意的私网目标。
 	allowed := resolveProxyIPs(proxy)
 	if err := applyProxyTransport(transport, proxy, f.allowPrivate, allowed); err != nil {
 		log.Printf("fetch: 代理 %q 不可用，已按直连处理: %v", proxy, err)
